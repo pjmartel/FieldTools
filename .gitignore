@@ -1,0 +1,4 @@
+__pycache__/
+.pytest_cache/
+# Output of the notebook
+data/field.pkl

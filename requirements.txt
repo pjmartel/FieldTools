@@ -1,0 +1,6 @@
+numpy
+MDAnalysis
+# Optional:
+# pytraj        alternative trajectory reader (-backend pytraj)
+# matplotlib    plots in FieldTools.ipynb
+# pytest        tests

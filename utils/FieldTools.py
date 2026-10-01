@@ -1,544 +1,503 @@
-import sys
-import os
-import subprocess
-import numpy as np  
-import pickle
+#!/usr/bin/env python3
+"""FieldTools: electric fields from MD trajectories.
+
+Calculates the electric field exerted by all atoms of a system (point charges from
+the parameter file, or optionally QM charges) at selected atoms or projected onto
+selected bonds, decomposed into protein residues and solvent species.
+
+Run `python utils/FieldTools.py -h` for usage.
+"""
+
+import argparse
 import datetime
-#import mdtraj as md
-import MDAnalysis as mda
+import os
+import pickle
+import sys
 import warnings
 
-def ResNr_from_ResName(ResName, Names):
-    for Name_i in range(0,len(Names),1):
-        if ResName == Names[Name_i][1]:
-            return Names[Name_i][2]
+import numpy as np
 
-def Calc_Electrostatic_Potential_Energy(_ABC,_XYZ,_Charge,_Target_Charge):
-    # Electrostatic Potential energy at _xyz from Atom _abc with _Charge and Target_Charges U = k*q*Q/r
-    _Couloumb_Const = 1.00 #(A.U.)
-    _Vector = _ABC-_XYZ        
-    _Length = np.linalg.norm(_Vector)
-    _Length_Bohr = _Length/0.529177249           # Bohr
-    _Energy = (_Couloumb_Const*float(_Charge)*float(_Target_Charge)/(_Length_Bohr))   #### WRONG!!!!!!!!!!
-    ### 1 a.u. = 2625.5 kJ/mol
-    _Energy=_Energy*2625.5    
-    return(_Energy)
+### Physical constants (CODATA 2018)
+BOHR = 0.529177210903                       # Angstrom
+AU_FIELD_MV_CM = 5142.20674763              # 1 a.u. of electric field in MV/cm
+HARTREE_KJ_MOL = 2625.4996394799            # 1 Hartree in kJ/mol
+FIELD_CONST = AU_FIELD_MV_CM * BOHR**2      # q [e] / r^2 [A^2]   -> MV/cm
+ENERGY_CONST = HARTREE_KJ_MOL * BOHR        # q*Q [e^2] / r [A]  -> kJ/mol
 
-def Field_of_ABC_at_XYZ_projected_onto_VEC(_ABC,_XYZ,_VEC,_Charge,arg_energy_out,Target_Charges):
-    
-    # Field at _xyz from Atom _abc with _Charge E = k*Q/r/r
-    _Couloumb_Const = 1.00 #(A.U.)
-    _Vector = _ABC-_XYZ        
-    _Length = np.linalg.norm(_Vector)
-    _Normalized_Vector = (-1.0)*_Vector/_Length
-    _Length_Bohr = _Length/0.529177249           # Bohr
-    _Field = (_Couloumb_Const*float(_Charge)/_Length_Bohr**2)*_Normalized_Vector
-    _Field = np.dot(_Field,_VEC)
-    ### 1 a.u. = 5.14x10^9 V/cm
-    ### 1 a.u. = 5.14x10^3 MV/cm
-    _Field=_Field*5.14*1000
+TARGET_HELP = """
+Target file (-target):
+  One target per line, written as one or two atom specifiers :<residue>@<atom>,
+  where <residue> is a residue number (e.g. 40) or a unique residue name (e.g. LIG).
+    :47@OG          field at atom OG of residue 47; the output is the magnitude
+                    of the field vector |E| (the vectors are written with -vector_out)
+    :47@OG :47@HG   field at the bond midpoint, projected onto the unit vector
+                    pointing from the first to the second atom (signed, MV/cm)
 
-    _Energy = 0.0               
-    return _Field,_Energy
+Exclusion file (-exclude_atoms):
+  One line per target (same order as the target file), or a single line that is
+  applied to all targets. Each line lists atom specifiers whose charges are
+  ignored for that target: :40@CA (one atom), :40@CA,CB,HA (several atoms of a
+  residue) or :264 (a whole residue). Without -exclude_atoms, all atoms of the
+  residue of the first target atom are excluded. The target atom of a point
+  target is always excluded.
 
-def Field_of_ABC_at_XYZ(_ABC,_XYZ,_Charge,arg_energy_out,Target_Charges):
-    
-    # Field at _xyz from Atom _abc with _Charge E = k*Q/r/r 
-    _Couloumb_Const = 1.00 #(A.U.)
-    _Vector = _ABC-_XYZ        
-    _Length = np.linalg.norm(_Vector)
-    _Length_Bohr = _Length/0.529177249           # Bohr
-    _Field = (-1)*(_Couloumb_Const*float(_Charge)/(_Length_Bohr**2))
-    ### 1 a.u. = 5.14x10^9 V/cm
-    ### 1 a.u. = 5.14x10^3 MV/cm
-    _Field=_Field*5.14*1000
-    
-    _Energy = 0.0
-    if arg_energy_out != "False":
-        _Energy = Calc_Electrostatic_Potential_Energy(_ABC,_XYZ,_Charge,Target_Charges[0])
-                
-    return _Field,_Energy
+Output (-out): pickled dictionary
+  Fields[target][component] = [field_frame_1, field_frame_2, ...]   (MV/cm)
+  Components: Total, Protein, Solvent, each solvent species (as given with
+  -solvent) and each protein residue (RESNAME_RESNUMBER).
+  For point targets, each component is the magnitude of that component's field
+  vector, so magnitudes of the components do not add up to the Total.
 
-def fkt_Update_Charges(QM_Charges,QM_Dict,Frame_i,Names,Charges):
-    stop="X"
-    for QM_Charge_i in range(0,len(QM_Charges),1):
-        if len(QM_Charges[QM_Charge_i])==2:
-            if QM_Charges[QM_Charge_i][1]==str(Frame_i+1):
-                start = QM_Charge_i+1
-            if QM_Charges[QM_Charge_i][1]==str(Frame_i+2):
-                stop = QM_Charge_i
-                QM_Charges = QM_Charges[start:stop]
-                break
-    if stop == "X":
-        QM_Charges = QM_Charges[start:]   
-    
-    for QM_Atom_i in range(0,len(QM_Dict),1):
-        for Atom_i in range(0,len(Names),1):
-            Name_tmp = Names[Atom_i][0]+"_"+Names[Atom_i][1]+"_"+Names[Atom_i][2]
-            if Name_tmp == QM_Dict[QM_Atom_i]:      #QM_Atom_i index in QM_Charges to be changed from 
-                Charges[Atom_i]=QM_Charges[QM_Atom_i][2]
-                break
-    return Charges
-
-def fkt_Load_QM_Charges(arg_qm_charges,arg_qm_dict):
-    with open(arg_qm_charges) as f:
-        QM_Charges = [i.split() for i in f.readlines()]
-    with open(arg_qm_dict) as f:
-        QM_Dict = [i.split("\n")[0] for i in f.readlines()]
-    return QM_Charges,QM_Dict
-
-def decompose_fields(Absolut_Fields,Absolut_Field,Names,Atom_Index,arg_solvent):
-    #### Total Field
-    Absolut_Fields["Total"]+=Absolut_Field
-    #### Solvent Field
-    if Names[Atom_Index][1] in arg_solvent:
-        Absolut_Fields["Solvent"]+=Absolut_Field
-        Absolut_Fields[Names[Atom_Index][1]]+=Absolut_Field
-    else:
-        Absolut_Fields["Protein"]+=Absolut_Field
-        Absolut_Fields[Names[Atom_Index][1]+"_"+Names[Atom_Index][2]]+=Absolut_Field
-    return Absolut_Fields
-
-def fkt_calc_fields(FIELDS,FIELD,XYZ,VEC,Frame,Charges,Names,Field_Components,arg_solvent,Self_i,arg_exclude_atoms,                    arg_energy_out,Target_Index,ENERGIES):
-
-### VARIABLES STRUCTURE
-    Absolut_Fields = {}
-    for Field_Component in Field_Components:
-        Absolut_Fields[Field_Component] = 0.0
-    Absolut_Energies = {}
-    for Field_Component in Field_Components:
-        Absolut_Energies[Field_Component] = 0.0
-
-    Target_Charges = Target_Index[FIELD]
-    Target_Charges = [Charges[i] for i in Target_Charges]
-    
-    for Atom_Index in range(0,len(Frame),1):   
-#### Exclude Self-residue!!! 
-        if arg_exclude_atoms == "False":
-            if not Self_i.isdigit():
-                Self_i = ResNr_from_ResName(Self_i,Names)
-            if Names[Atom_Index][2] == Self_i: continue        
-        else:
-            if Atom_Index in arg_exclude_atoms[FIELD]: continue
-                
-        if len(FIELD.split("_")) == 1:   #POINT CALCULATION
-            Absolut_Field, Absolut_Energy = Field_of_ABC_at_XYZ(Frame[Atom_Index],XYZ,Charges[Atom_Index],arg_energy_out,                                                                Target_Charges)
-            
-        if len(FIELD.split("_")) == 2:   #VECTOR CALCULATION
-            Absolut_Field, Absolut_Energy = Field_of_ABC_at_XYZ_projected_onto_VEC(Frame[Atom_Index],XYZ,VEC,                                                                                   Charges[Atom_Index],arg_energy_out,                                                                                   Target_Charges)
-        
-        Absolut_Energies = decompose_fields(Absolut_Energies,Absolut_Energy,Names,Atom_Index,arg_solvent)
-        Absolut_Fields   = decompose_fields(Absolut_Fields,Absolut_Field,Names,Atom_Index,arg_solvent)
-    
-    for Field_Component in Field_Components:
-        FIELDS[FIELD][Field_Component].append(Absolut_Fields[Field_Component])
-        if arg_energy_out != "False":
-            ENERGIES[FIELD][Field_Component].append(Absolut_Energies[Field_Component])
-    return FIELDS, ENERGIES
-
-def fkt_Field_Components(FIELDS,Names,arg_solvent):
-    
-    Field_Components = ["Total","Protein","Solvent"]+arg_solvent
-
-    for Name in Names:
-        if Name[1] not in arg_solvent:
-            if Name[1]+"_"+Name[2] not in Field_Components: 
-                Field_Components += [Name[1]+"_"+Name[2]] 
-
-    for Field in FIELDS:
-        for Field_Component in Field_Components:
-            FIELDS[Field][Field_Component]=[]
-    
-    return FIELDS,Field_Components
-
-def fkt_get_Target_VEC(Target_XYZ):
-    
-    Target_VEC = {}
-
-    for Target in Target_XYZ:
-        if len(Target_XYZ[Target])==2:
-            Target_VEC[Target]={}
-            XYZ_START = Target_XYZ[Target][0]
-            XYZ_STOP  = Target_XYZ[Target][1]
-            Target_VEC[Target]["Center"] = (XYZ_START+XYZ_STOP)/2 
-            Target_VEC[Target]["Vector"] = (XYZ_STOP-XYZ_START)/np.linalg.norm(XYZ_STOP-XYZ_START)
-            
-    return Target_VEC
-
-def fkt_Target_Index(Names,arg_target,FIELDS):
-    
-    Target_Index={}
-    
-    with open(arg_target) as f:
-        Targets = [i.split() for i in f.readlines()]
-        
-    for Target in range(len(Targets)-1,-1,-1): #Delete empty lines
-        if len(Targets[Target]) == 0:
-            Targets = Targets[:Target]+Targets[Target+1:]
-    
-    for Target_i in range(0,len(Targets),1):
-        Target_Name = "_".join(Targets[Target_i])
-        FIELDS[Target_Name]={}
-        for Atom_i in range(0,len(Targets[Target_i]),1): #If this is a vector, it contains two Atoms!
-            Atom_ResidueNr = Targets[Target_i][Atom_i].split("@")[0][1:]
-            Atom_Name      = Targets[Target_i][Atom_i].split("@")[1]
-            #print Targets[Target_i][Atom_i], Atom_ResidueNr, Atom_Name
-            
-            if not Atom_ResidueNr.isdigit(): Atom_ResidueNr = ResNr_from_ResName(Atom_ResidueNr,Names)
-    
-            for Name_i in range(0,len(Names),1):
-                if Atom_ResidueNr == Names[Name_i][2]:      #Check if Residue Number matches
-                    if Atom_Name == Names[Name_i][0]:       #Check if Atom Name matches
-                        Targets[Target_i][Atom_i] = Name_i  #Update Number in Target
-                        break
-        Target_Index[Target_Name] = Targets[Target_i]
-    return Target_Index,FIELDS #Passed to Target_Index in main!
-
-def fkt_Exlude_Index(Names,arg_exclude_atoms,arg_target):
-    
-    Exclude_Index={}
-    
-    with open(arg_exclude_atoms) as f:
-        Excludes = [i.split() for i in f.readlines()]
-    with open(arg_target) as f:
-        Targets = [i.split() for i in f.readlines()]
-
-    for Excludes_i in range(0,len(Excludes),1):
-        Exclude_Index["_".join(Targets[Excludes_i])]=Excludes[Excludes_i]
-        for Atom_i in range(0,len(Excludes[Excludes_i]),1):    #If this is a vector, it contains two Atoms!
-            Atom_ResidueNr = Excludes[Excludes_i][Atom_i].split("@")[0][1:]
-            if not Atom_ResidueNr.isdigit(): Atom_ResidueNr = ResNr_from_ResName(Atom_ResidueNr,Names)
-            Atom_Name      = Excludes[Excludes_i][Atom_i].split("@")[1]
-            for Name_i in range(0,len(Names),1):
-                if Atom_ResidueNr == Names[Name_i][2]:      #Check if Residue Number matches
-                    if Atom_Name == Names[Name_i][0]:       #Check if Atom Name matches
-                        Exclude_Index["_".join(Targets[Excludes_i])][Atom_i] = Name_i  #Update Number in Target
-                        break
-    arg_exclude_atoms =  Exclude_Index              
-    return arg_exclude_atoms #Passed to Target_Index in main!
-
-def fkt_get_Target_XYZ(Frame,Target_Index):
-#Target_Index is a libary
-#Frame is
-#Make empty library
-    Target_XYZ = {}
-
-    for Target in Target_Index:
-        Target_XYZ[Target]=[]
-        for Atom_i in range(0,len(Target_Index[Target]),1): #If this is a vector, it contains two Atoms!
-            Target_XYZ[Target]=Target_XYZ[Target]+[Frame[Target_Index[Target][Atom_i]]]
-                
-    return Target_XYZ #Passed to Target_Index in main!
-
-def fkt_Load_Trajectory(arg_nc,arg_param,arg_TIP4P):
-
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', category=UserWarning)
-        u = mda.Universe(arg_param, arg_nc)
-    Trajectory = u.trajectory.timeseries()
-    Charges = u.atoms.charges
-    Names = u.atoms.names
-    AtomResid = u.atoms.resindices
-    ResidueNames = u.residues.resnames
-    ResidueNumbers = u.residues.resids
-    
-    for Name_i in range(0,len(Names),1):
-
-        ###########         AtommName ,                       ResName ,                                ResiNR
-        ###########                 0 ,                             1 ,                                     2      
-        Names[Name_i] = [Names[Name_i],ResidueNames[AtomResid[Name_i]],str(ResidueNumbers[AtomResid[Name_i]])]
-        #if ResidueNumbers[AtomResid[Name_i]] in ["211","212"]:
-        #    print Names[Name_i], Charges[Name_i]
-        
-    if arg_TIP4P=="True":
-        for Names_i in range(0,len(Names),1):
-            if Names[Names_i][0] == "EPW" and Names[Names_i][1] == "WAT":
-                Names[Names_i-3] = "del"
-                Charges[Names_i-3] = np.inf
-                for Frame_i in range(0,len(Trajectory),1):
-                    Trajectory[Frame_i][Names_i-3] = [np.inf,np.inf,np.inf]
-        Names   = [i for i in Names if i != "del"]
-        Charges = [i for i in Charges if i != np.inf]
-        Trajectory = Trajectory.tolist()
-        for Frame_i in range(0,len(Trajectory),1):
-            Frame = Trajectory[Frame_i]
-            Frame = np.array([i for i in Frame if np.inf not in i])
-            Trajectory[Frame_i] = Frame
-        Trajectory = np.array(Trajectory)  
-        
-    return (Trajectory, Charges, np.array(Names))
- 
-def make_pdb(arg_nc,arg_param,arg_pdb,arg_use_qmcharges,arg_TIP4P,arg_qm_mask,arg_out):
-    tmp_TIP4P = ""
-    if arg_TIP4P == "True": tmp_TIP4P = " include_ep"
-    cpptraj = """parm """+arg_param+"""
-trajin """+arg_nc+"""
-autoimage
-outtraj """+arg_pdb+""" """+tmp_TIP4P+""" onlyframes -1
+Trajectories must be imaged unless -pbc True is used.
 """
-    with open("cpptraj.in", "w") as f:
-        f.write(cpptraj)  
-    with open("cppraj.out", 'w') as f:
-        process = subprocess.call(['cpptraj', '-i', 'cpptraj.in'], stdout=f)
-        
-def load_qm_mask(arg_qm_mask):
-    with open(arg_qm_mask) as f:
-        arg_qm_mask = f.read()[:-1]
-    return arg_qm_mask
 
-def usage():
-    print("                                                                                                              ")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-------------                                FieldTools Usage:                                 -------------|")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-nc             : Specify trajectory file                                                                   |")
-    print("|-parm           : Specify parameter file                                                                    |")
-    print("|-out            : Specify output file                                                                       |")
-    print("|-energy_out     : Optional: Calculate Energies from Fields                                                  |")
-    print("|-target         : Specify target file                                                                       |")
-    print("|-solvent        : Optional: Comma seperated list of non-protein residues              [default WAT,Na+,Cl- ]|")
-    print("|-exclude_atoms  : Optional: Specify what atoms will be excluded from Field calculation                      |")
-    print("|                : If not set, Field calculation will exclude the full residue of the first atom defined     |")
-    print("|                : for each target.                                                                          |")
-    print("|-TIP4P          : Optional: Recognize TIP4P waters                                    [default False       ]|")
-    print("|-verbose        : Optional: Display additional information                            [default False       ]|")
-    print("|-use_qm_charges : Optional: Specify if qmcharges should be read                       [default False       ]|")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-------------        If -use_qm_charges = true, the following options have to be set:          -------------|")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-qm_mask        : Specify qm region (amber selection mask)                                                  |")
-    print("|-qm_charges     : Specify qmcharges file (qm partial charges of each frame, made with QMChargesTools)       |")
-    print("|-qm_dict        : Specify qmdict file (containing qmatom names in .pdb and gaussian)                        |")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-------------                              How to define -target:                              -------------|")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-target should point to a file, each line in that file defines target to calculate the Field                |")
-    print("|Targets are selected using the amber selection syntax                                                       |")
-    print("|To calculate the magnitude of the field at a specific atom:     :47@OG                                      |")
-    print("|To calculate the magnitude of the field projected along a bond: :47@OG :47@OH                               |")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|-------------                                      INFO                                        -------------|")
-    print("|------------------------------------------------------------------------------------------------------------|")
-    print("|Script recognizes if total field at one point or projection onto a bond is to be calculated                 |")
-    print("|based on the input in -target                                                                               |")
-    print("|-------------                                                                                               |")
-    print("|Script excludes all Field contributions of the Residue at which the field is calculated.                    |")
-    print("|For Vector Projections, this is only the first residue number!                                              |")
-    print("|-------------                                                                                               |")
-    print("|Solvent = All atoms as defined in -solvent,                                                                 |")
-    print("|          for these residues contributions will also be grouped based on the residue name                   |")
-    print("|Protein = All atoms that are not part of -solvent,                                                          |")
-    print("|          for the protein, per-reside fields will be calculated                                             |")
-    print("|-------------                                                                                               |")
-    print("|Linker Atom charge is ignored!                                                                              |")
-    print("|------------------------------------------------------------------------------------------------------------|") 
-    
-def inputParser(arg):
-    
-    arg_nc            = False                                                                         ### Add new flag here
-    arg_param         = False
-    arg_out           = False
-    arg_energy_out    = "False"
-    arg_target        = False
-    arg_solvent       = "WAT,Na+,Cl-"
-    arg_exclude_atoms = "False" 
-    arg_TIP4P         = "False"
-    arg_verbose       = "False"
-    arg_use_qmcharges = "False"
-    arg_qm_mask       = False
-    arg_qm_charges    = False
-    arg_qm_dict       = False  
-    
-    if(len(arg) == 1) or arg[1] in ["-help","--help","-h"]:
-        usage()
-        quit()
-    
-    for index in range(1,len(arg)-1,2):
-        param = arg[index]
-        if arg[index] in ["False",False,""]: continue
-        if param=="-nc"               : arg_nc            = os.getcwd()+"/"+str(arg[index+1])         ### Add new flag here
-        elif param=="-parm"           : arg_param         = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-out"            : arg_out           = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-energy_out"     : arg_energy_out    = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-target"         : arg_target        = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-exclude_atoms"  : arg_exclude_atoms = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-qm_dict"        : arg_qm_dict       = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-qm_mask"        : arg_qm_mask       = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-qm_charges"     : arg_qm_charges    = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-qm_dict"        : arg_qm_dict       = os.getcwd()+"/"+str(arg[index+1])
-        elif param=="-solvent"        : arg_solvent       = str(arg[index+1])
-        elif param=="-TIP4P"          : arg_TIP4P         = str(arg[index+1])
-        elif param=="-verbose"        : arg_verbose       = str(arg[index+1])
-        elif param=="-use_qm_charges" : arg_use_qmcharges = str(arg[index+1])
+
+#####################################################################################
+### Input
+#####################################################################################
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("true", "t", "yes", "y", "1"):
+        return True
+    if value.lower() in ("false", "f", "no", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected True or False, got '{value}'")
+
+
+def optional_path(value):
+    # Allows wrappers (e.g. the notebook) to pass "False" or "" for unset files
+    return None if value in ("", "False", "None") else value
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="FieldTools.py",
+        description="Calculate electric fields from MD trajectories.",
+        epilog=TARGET_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+    parser.add_argument("-nc", required=True, help="trajectory file")
+    parser.add_argument("-parm", required=True, help="parameter (topology) file")
+    parser.add_argument("-target", required=True, help="target file (see below)")
+    parser.add_argument("-out", required=True, help="output file for the fields (.pkl)")
+    parser.add_argument("-solvent", default="WAT,Na+,Cl-",
+                        help="comma separated list of non-protein residue names [default: %(default)s]")
+    parser.add_argument("-exclude_atoms", type=optional_path, default=None,
+                        help="file with atoms excluded from the field calculation (see below)")
+    parser.add_argument("-TIP4P", type=str2bool, default=False,
+                        help="system uses a 4-point water model (WAT with EPW) [default: False]")
+    parser.add_argument("-pbc", type=str2bool, default=False,
+                        help="use the periodic image of every atom closest to the target, "
+                             "so the trajectory does not have to be imaged [default: False]")
+    parser.add_argument("-energy_out", type=optional_path, default=None,
+                        help="also write the Coulomb interaction energy (kJ/mol) between the "
+                             "target atom(s) and the environment to this file (.pkl)")
+    parser.add_argument("-vector_out", type=optional_path, default=None,
+                        help="also write the field vectors (MV/cm) of every target and component "
+                             "to this file (.pkl), as arrays of shape (n_frames, 3)")
+    parser.add_argument("-backend", choices=["auto", "mdanalysis", "pytraj"], default="auto",
+                        help="library used to read the trajectory [default: auto]")
+    parser.add_argument("-verbose", type=str2bool, default=False,
+                        help="display additional information [default: False]")
+    parser.add_argument("-use_qm_charges", type=str2bool, default=False,
+                        help="replace charges with per-frame QM charges from QMChargesTools [default: False]")
+    parser.add_argument("-qm_charges", type=optional_path, default=None,
+                        help="QM charges file (per-frame partial charges made with QMChargesTools)")
+    parser.add_argument("-qm_dict", type=optional_path, default=None,
+                        help="QM dict file (atom names of the QM region, made with QMChargesTools)")
+    parser.add_argument("-qm_mask", type=optional_path, default=None,
+                        help="QM region mask file (accepted for compatibility, not used)")
+    return parser
+
+
+def parse_arguments(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.use_qm_charges and (args.qm_charges is None or args.qm_dict is None):
+        parser.error("-use_qm_charges True requires -qm_charges and -qm_dict")
+    args.solvent = [i for i in args.solvent.split(",") if i]
+    return args
+
+
+def read_lines(path):
+    # Non-empty lines, with comments (#) removed
+    with open(path) as f:
+        lines = [line.split("#")[0].strip() for line in f]
+    return [line for line in lines if line]
+
+
+#####################################################################################
+### Trajectory loading
+#####################################################################################
+
+class System:
+    """Topology arrays plus a generator over (positions, box) of each frame."""
+
+    def __init__(self, names, resnames, resids, charges, n_frames, frames):
+        self.names = np.asarray(names, dtype=str)
+        self.resnames = np.asarray(resnames, dtype=str)
+        self.resids = np.asarray(resids, dtype=str)
+        self.charges = np.asarray(charges, dtype=np.float64)
+        self.n_atoms = len(self.names)
+        self.n_frames = n_frames
+        self._frames = frames
+
+    def frames(self):
+        return self._frames()
+
+
+def load_mdanalysis(parm, nc):
+    import MDAnalysis as mda
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        u = mda.Universe(parm, nc)
+    atoms = u.atoms
+
+    def frames():
+        for ts in u.trajectory:
+            box = None if ts.dimensions is None else np.array(ts.dimensions, dtype=np.float64)
+            yield ts.positions.astype(np.float64), box
+
+    return System(atoms.names, atoms.resnames, atoms.resids.astype(str), atoms.charges,
+                  len(u.trajectory), frames)
+
+
+def load_pytraj(parm, nc):
+    import pytraj as pt
+    traj = pt.iterload(nc, parm)
+    top = traj.topology
+    residues = list(top.residues)
+    atoms = list(top.atoms)
+
+    def frames():
+        for frame in traj:
+            box = np.array(frame.box.values, dtype=np.float64)
+            yield np.array(frame.xyz, dtype=np.float64), (box if box[:3].any() else None)
+
+    return System([str(a.name).strip() for a in atoms],
+                  [str(residues[a.resid].name).strip() for a in atoms],
+                  [str(a.resid + 1) for a in atoms],
+                  top.charge, traj.n_frames, frames)
+
+
+def load_system(parm, nc, backend="auto"):
+    if backend in ("auto", "mdanalysis"):
+        try:
+            return load_mdanalysis(parm, nc)
+        except ImportError:
+            if backend == "mdanalysis":
+                raise
+    try:
+        return load_pytraj(parm, nc)
+    except ImportError:
+        sys.exit("Error! Neither MDAnalysis nor pytraj is installed (pip install mdanalysis).")
+
+
+#####################################################################################
+### Atom selection
+#####################################################################################
+
+def select_atoms(spec, system):
+    """Indices of the atoms matching :<resid|resname>[@<name>[,<name>...]]."""
+    if not spec.startswith(":"):
+        sys.exit(f"Error! Invalid atom specifier '{spec}'. Expected :<residue>@<atom>, e.g. :40@OG")
+    residue, _, atom_names = spec[1:].partition("@")
+    if residue == "":
+        sys.exit(f"Error! Invalid atom specifier '{spec}'. Expected :<residue>@<atom>, e.g. :40@OG")
+    by_number = residue.isdigit()
+    selection = (system.resids == residue) if by_number else (system.resnames == residue)
+    if atom_names:
+        selection &= np.isin(system.names, atom_names.split(","))
+    indices = np.flatnonzero(selection)
+    if len(indices) == 0:
+        sys.exit(f"Error! No atom in the system matches '{spec}'.")
+    return indices
+
+
+def select_one_atom(spec, system):
+    indices = select_atoms(spec, system)
+    if len(indices) != 1:
+        found = ", ".join(f":{system.resids[i]}@{system.names[i]} ({system.resnames[i]})" for i in indices[:10])
+        sys.exit(f"Error! Target '{spec}' must match exactly one atom, but matches {len(indices)}: {found}")
+    return int(indices[0])
+
+
+def load_targets(target_file, system):
+    targets = []
+    for line in read_lines(target_file):
+        specs = line.split()
+        if len(specs) > 2:
+            sys.exit(f"Error! Target '{line}' has {len(specs)} atoms; use one (atom) or two (bond).")
+        targets.append({
+            "name": "_".join(specs),
+            "kind": "point" if len(specs) == 1 else "bond",
+            "atoms": [select_one_atom(spec, system) for spec in specs],
+        })
+    if not targets:
+        sys.exit(f"Error! No targets defined in {target_file}.")
+    return targets
+
+
+def load_exclusions(exclude_file, targets, system):
+    """Boolean mask (n_atoms) of excluded atoms for each target."""
+    lines = read_lines(exclude_file) if exclude_file else []
+    if lines in ([], ["False"]):
+        lines = None
+    elif len(lines) == 1:
+        lines = lines * len(targets)
+    elif len(lines) != len(targets):
+        sys.exit(f"Error! {exclude_file} has {len(lines)} lines but there are {len(targets)} targets. "
+                 "Use one line per target or a single line for all targets.")
+
+    for i, target in enumerate(targets):
+        excluded = np.zeros(system.n_atoms, dtype=bool)
+        if lines is None:
+            # Default: exclude the full residue of the first target atom
+            excluded[system.resids == system.resids[target["atoms"][0]]] = True
         else:
-            print ("Error! "+param+" not a valid option.")
-            usage()
-            quit() 
+            for spec in lines[i].split():
+                excluded[select_atoms(spec, system)] = True
+        if target["kind"] == "point":
+            excluded[target["atoms"][0]] = True   # its own charge sits at r = 0
+        target["excluded"] = excluded
 
-    ### If exclude_atoms does not contain any atoms or just "False", set arg_exclude_atoms to False
-    with open(arg_exclude_atoms) as f:
-        Excludes = f.readlines()
-    if Excludes in [[],["False"]]:
-        arg_exclude_atoms = "False" 
-        
-                                                                                                      ### Add new flag here
-    if arg_nc        == False: print ("ERROR. Please specify the name of the trajectory file with -nc")  
-    if arg_param     == False: print ("ERROR. Please specify the name of the parameter file with -parm")
-    if arg_out       == False: print ("ERROR. Please specify the name of the output file with -out")
-    if arg_target    == False: print ("ERROR. Please specify the name of the target file with -target.                                       \n -> See examples with --help")
-    if arg_use_qmcharges == "True":
-        if arg_qm_mask    == False: print ("ERROR. Please specify qm mask with -qm_mask")
-        if arg_qm_charges == False: print ("ERROR. Please specify charge of the qm region with -qm_charge")
-        if arg_qm_dict    == False: print ("ERROR. Please specify qm_dict with -qm_dict")
-        
-    if False in [arg_nc,arg_param,arg_out,arg_target]:                                                ### Add new flag here
-        usage()
-        quit()
-    if arg_use_qmcharges == "True":
-        if False in [arg_qm_mask,arg_qm_charges,arg_qm_dict]:                                         ### Add new flag here
-            usage()
-            quit()
-    
-    print ("-nc              Trajectory file      : ",arg_nc)                                         ### Add new flag here
-    print ("-parm            Parameter file       : ",arg_param)
-    print ("-out             Output file          : ",arg_out)
-    print ("-target          Field target         : ",arg_target)
-    print ("-arg_solvent     Non-protein residues : ",arg_solvent)
-    if arg_exclude_atoms != "False":
-        print ("-exclude_atoms   Atoms excluded       : ",arg_exclude_atoms)
-    else:
-        print ("-exclude_atoms   Atoms excluded       : Full residue defined in the first Atom for each Target.")
-    if arg_TIP4P == "True":
-        print ("-TIP4P           Recognize TIP4P wat  : ",arg_TIP4P)
-    if arg_energy_out != "False":
-        print ("-energy_out      Energy from Fields   : ",arg_energy_out)
-    if arg_verbose == "True":
-        print ("-arg_verbose     Verbose information  : ",arg_verbose)
-    if arg_use_qmcharges == "True":
-        print ("-use_qm_charges  QM_theory            :  True")
-        print ("-qm_mask         QM region            : ",arg_qm_mask)
-        print ("-qm_charges      QM charges           : ",arg_qm_charges)
-        print ("-qm_dict         QM dict              : ",arg_qm_dict) 
-    
-    return arg_nc,arg_param,arg_out,arg_energy_out,arg_target,arg_solvent,arg_exclude_atoms,arg_TIP4P,arg_verbose,           arg_use_qmcharges,arg_qm_mask,arg_qm_charges,arg_qm_dict                                   ### Add new flag here
-    
-def main():
-    ########################
-    ### THE FINAL SCRIPT ###
-    ########################
-    ### Read in arguments                                                                             
-    arg_nc,arg_param,arg_out,arg_energy_out,arg_target,arg_solvent,arg_exclude_atoms,arg_TIP4P,arg_verbose,               arg_use_qmcharges,arg_qm_mask,arg_qm_charges,arg_qm_dict=inputParser(sys.argv)         ### Add new flag here
-    arg_solvent = arg_solvent.split(",")
 
-    print ("\nField calculation RUNNING : ",datetime.datetime.now()) 
+def tip4p_oxygens(system):
+    """Mask of the (massless, uncharged) oxygens of 4-point waters; EPW follows O, H1, H2."""
+    extra_points = np.flatnonzero((system.names == "EPW") & (system.resnames == "WAT"))
+    oxygens = extra_points - 3
+    if len(extra_points) == 0 or np.any(oxygens < 0) or np.any(system.resids[oxygens] != system.resids[extra_points]):
+        sys.exit("Error! -TIP4P True, but no WAT residues with atom order O, H1, H2, EPW were found.")
+    mask = np.zeros(system.n_atoms, dtype=bool)
+    mask[oxygens] = True
+    return mask
 
-    #Load qm_mask.in
-    if arg_use_qmcharges == "True":
-        arg_qm_mask = load_qm_mask(arg_qm_mask)
 
-    ### Empty dictionary storing all Fields
-    FIELDS = {}
-    ENERGIES = {}
+#####################################################################################
+### Field components
+#####################################################################################
 
-######################## not necessary anymore! Keept in case this might become interesting again
-    ### Make pdb of system
-    #arg_pdb = ".".join(arg_out.split(".")[:-1])+"_full.pdb"
-    #make_pdb(arg_nc,arg_param,arg_pdb,arg_use_qmcharges,arg_TIP4P,arg_qm_mask,arg_out)
-######################## not necessary anymore!
+def field_components(system, solvent):
+    """Component names and, per atom, the index of its residue component."""
+    is_solvent = np.isin(system.resnames, solvent)
+    components = ["Total", "Protein", "Solvent"] + list(solvent)
+    index = {name: i for i, name in enumerate(components)}
+    atom_component = np.empty(system.n_atoms, dtype=np.int64)
+    for i in range(system.n_atoms):
+        key = system.resnames[i] if is_solvent[i] else f"{system.resnames[i]}_{system.resids[i]}"
+        if key not in index:
+            index[key] = len(components)
+            components.append(key)
+        atom_component[i] = index[key]
+    return components, atom_component, is_solvent
 
-    ### Load QM charges
-    if arg_use_qmcharges == "True":
-        QM_Charges,QM_Dict = fkt_Load_QM_Charges(arg_qm_charges,arg_qm_dict) 
-        if arg_verbose=="True": print ("QM_Dict :", QM_Dict,"\n" )     
-        if arg_verbose=="True": print ("QM_Charges :", QM_Charges[:50],"\n")
 
-    ### Load Trajectory
-    Trajectory, Charges, Names = fkt_Load_Trajectory(arg_nc,arg_param,arg_TIP4P)
-    if arg_verbose=="True": print ("Trajectory :", Trajectory[0])
-    if arg_verbose=="True": print ("Charges :", Charges)
-    if arg_verbose=="True": print ("Names :", Names)
-    if len(Trajectory[0]) != len(Charges) or len(Trajectory[0]) != len(Names):
-        print ("Error! Trajectory, Charges, and Atom Name Lists have different length")
-        print ("Trajectory :", len(Trajectory[0]))
-        print ("Charges :", len(Charges))
-        print ("Names :", len(Names),"\n","\n")
-        usage()
-        quit()
-    
-    if arg_verbose=="True": print ("Topology information (index,Coords,Charges,Names):")
-    for i in range(0,len(Names),1):
-        if arg_verbose=="True": print (i, Trajectory[0][i], Charges[i], Names[i] )
+def decompose(values, atom_component, is_solvent, n_components):
+    """Sum per-atom values (n, 3) into components (n_components, 3)."""
+    result = np.empty((n_components, values.shape[1]))
+    for j in range(values.shape[1]):
+        result[:, j] = np.bincount(atom_component, weights=values[:, j], minlength=n_components)
+    result[0] = values.sum(axis=0)
+    result[1] = values[~is_solvent].sum(axis=0)
+    result[2] = values[is_solvent].sum(axis=0)
+    return result
 
-    ### Load Index of Target Atoms for Field calculation
-    Target_Index,FIELDS = fkt_Target_Index(Names,arg_target,FIELDS)
-    if arg_verbose=="True": print ("Target_Index:", Target_Index,"\n")
-    if arg_verbose=="True": print ("Field_Dict:", FIELDS,"\n")
 
-    ### Load Index of Excluded Atoms
-    if arg_exclude_atoms != "False":
-        arg_exclude_atoms = fkt_Exlude_Index(Names,arg_exclude_atoms,arg_target)
-        if arg_verbose=="True": print ("Excluded_Atoms:", arg_exclude_atoms,"\n")
-            
-    ### Define Field Components (Total,Protein,Solvent,Each residue,Each solvent type) to calculate
-    FIELDS,Field_Components = fkt_Field_Components(FIELDS,Names,arg_solvent)
-    if arg_verbose=="True": print ("Field_Dict:", FIELDS,"\n")
-    if arg_energy_out != "False":
-        ENERGIES = {}
-        for FIELD in FIELDS:
-            ENERGIES[FIELD] = {}
-            for Field_Component in FIELDS[FIELD]:
-                ENERGIES[FIELD][Field_Component] = []
-        if arg_verbose=="True": print ("Energy_Dict:", ENERGIES,"\n") 
+#####################################################################################
+### Physics
+#####################################################################################
 
-    ### Loop through Trajectory to calculate Fields
-    for Frame_i in range(0,len(Trajectory),1):
+def box_matrix(dimensions):
+    """Box vectors (rows) from [a, b, c, alpha, beta, gamma]."""
+    a, b, c = dimensions[:3]
+    alpha, beta, gamma = np.radians(dimensions[3:6])
+    bx, by = b * np.cos(gamma), b * np.sin(gamma)
+    cx = c * np.cos(beta)
+    cy = c * (np.cos(alpha) - np.cos(beta) * np.cos(gamma)) / np.sin(gamma)
+    cz = np.sqrt(c**2 - cx**2 - cy**2)
+    return np.array([[a, 0.0, 0.0], [bx, by, 0.0], [cx, cy, cz]])
 
-    ### Get XYZ coordinates of the Target Atoms
-        Target_XYZ=fkt_get_Target_XYZ(Trajectory[Frame_i],Target_Index)
-        if arg_verbose=="True": print ("Target_XYZ:",Target_XYZ,"\n")
-        Target_VEC=fkt_get_Target_VEC(Target_XYZ)
-        if arg_verbose=="True": print ("Target_VEC:",Target_VEC,"\n")    
-    ### Update QM_Charges
-        if arg_use_qmcharges == "True":
-            Charges = fkt_Update_Charges(QM_Charges,QM_Dict,Frame_i,Names,Charges)  
-            if arg_verbose=="True": print ("Charges :", Charges,"\n")    
-            
-    ### Loop through FIELDS to calculate each Target
-        for FIELD in FIELDS:
-            if len(FIELD.split("_")) == 1:   #POINT CALCULATION
-                XYZ = Target_XYZ[FIELD][0]
-                VEC = ""
-            if len(FIELD.split("_")) == 2:   #VECTOR CALCULATION
-                XYZ = Target_VEC[FIELD]['Center']
-                VEC = Target_VEC[FIELD]['Vector']
-            Self_i = FIELD.split("@")[0][1:]
-            
-    ### Calculate Fields - This is where the magic happens!
-            FIELDS,ENERGIES = fkt_calc_fields(FIELDS,FIELD,XYZ,VEC,Trajectory[Frame_i],Charges,Names,                                              Field_Components,arg_solvent,Self_i,arg_exclude_atoms,arg_energy_out,                                              Target_Index,ENERGIES)
-            if arg_verbose=="True": 
-                for Field_Component in FIELDS[FIELD]:
-                    print (FIELD,Field_Component,FIELDS[FIELD][Field_Component]) 
-                if arg_energy_out != "False":    
-                    for Field_Component in ENERGIES[FIELD]:
-                        print (FIELD,Field_Component,ENERGIES[FIELD][Field_Component])    
-    
-    pickle.dump(FIELDS,open(arg_out,"wb"))   
-    if arg_energy_out != "False":
-        pickle.dump(ENERGIES,open(arg_energy_out,"wb"))
-    print ("\nField calculation DONE : ",datetime.datetime.now() )      
-            
+
+def minimum_image(vectors, box):
+    """Wrap displacement vectors into the unit cell centred on the origin."""
+    fractional = vectors @ np.linalg.inv(box)
+    fractional -= np.round(fractional)
+    return fractional @ box
+
+
+def displacements(point, positions, box):
+    """Vectors pointing from every atom to `point`."""
+    vectors = point - positions
+    return vectors if box is None else minimum_image(vectors, box)
+
+
+def field_vectors(point, positions, charges, box):
+    """Field (MV/cm) of each charge at `point`: E = k*q*r_vec/r^3."""
+    vectors = displacements(point, positions, box)
+    r = np.sqrt(np.einsum("ij,ij->i", vectors, vectors))
+    return FIELD_CONST * (charges / r**3)[:, None] * vectors
+
+
+def coulomb_energies(point, target_charge, positions, charges, box):
+    """Coulomb energy (kJ/mol) of a charge at `point` with each charge: U = k*q*Q/r."""
+    vectors = displacements(point, positions, box)
+    r = np.sqrt(np.einsum("ij,ij->i", vectors, vectors))
+    return ENERGY_CONST * target_charge * charges / r
+
+
+#####################################################################################
+### QM charges
+#####################################################################################
+
+def load_qm_charges(qm_charges_file, qm_dict_file, system):
+    """Per-frame QM charges and the atom index of each QM atom."""
+    frames, current = {}, None
+    with open(qm_charges_file) as f:
+        for line in f:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "Frame":
+                current = int(parts[1])
+                frames[current] = []
+            elif current is not None:
+                frames[current].append(float(parts[2]))
+
+    keys = {}
+    for i in range(system.n_atoms):
+        keys.setdefault(f"{system.names[i]}_{system.resnames[i]}_{system.resids[i]}", i)
+    qm_index = []
+    for key in read_lines(qm_dict_file):
+        if key not in keys:
+            sys.exit(f"Error! QM atom '{key}' from {qm_dict_file} not found in the topology.")
+        qm_index.append(keys[key])
+    return frames, np.array(qm_index, dtype=np.int64)
+
+
+def qm_frame_charges(charges, qm_frames, qm_index, frame_i):
+    frame_number = frame_i + 1
+    if frame_number not in qm_frames:
+        sys.exit(f"Error! No QM charges for frame {frame_number}.")
+    qm = qm_frames[frame_number]
+    if len(qm) < len(qm_index):
+        sys.exit(f"Error! Frame {frame_number} has {len(qm)} QM charges, but the QM dict has {len(qm_index)} atoms.")
+    charges = charges.copy()
+    charges[qm_index] = qm[:len(qm_index)]   # Link atom charges (after the QM atoms) are ignored
+    return charges
+
+
+#####################################################################################
+### Main
+#####################################################################################
+
+def calculate_fields(args):
+    system = load_system(args.parm, args.nc, args.backend)
+    targets = load_targets(args.target, system)
+    load_exclusions(args.exclude_atoms, targets, system)
+    components, atom_component, is_solvent = field_components(system, args.solvent)
+    n_components = len(components)
+
+    ignored = tip4p_oxygens(system) if args.TIP4P else np.zeros(system.n_atoms, dtype=bool)
+    if args.use_qm_charges:
+        qm_frames, qm_index = load_qm_charges(args.qm_charges, args.qm_dict, system)
+
+    if args.verbose:
+        print(f"Atoms: {system.n_atoms}  Frames: {system.n_frames}  Components: {n_components}")
+        for target in targets:
+            print(f"Target {target['name']} ({target['kind']}): atoms {target['atoms']}, "
+                  f"{int(target['excluded'].sum())} atoms excluded")
+
+    fields = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
+    vectors = {t["name"]: np.zeros((system.n_frames, n_components, 3)) for t in targets}
+    energies = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
+
+    for frame_i, (positions, box) in enumerate(system.frames()):
+        if args.pbc:
+            if box is None:
+                sys.exit("Error! -pbc True, but the trajectory has no box information.")
+            box = box_matrix(box)
+        else:
+            box = None
+        charges = system.charges
+        if args.use_qm_charges:
+            charges = qm_frame_charges(charges, qm_frames, qm_index, frame_i)
+
+        for target in targets:
+            name, atoms = target["name"], target["atoms"]
+            included = ~(target["excluded"] | ignored)
+            pos, q = positions[included], charges[included]
+            comp, solv = atom_component[included], is_solvent[included]
+
+            if target["kind"] == "point":
+                point = positions[atoms[0]]
+            else:
+                bond = displacements(positions[atoms[1]], positions[atoms[0]][None, :], box)[0]
+                point = positions[atoms[0]] + bond / 2
+                unit = bond / np.linalg.norm(bond)
+
+            field = decompose(field_vectors(point, pos, q, box), comp, solv, n_components)
+            vectors[name][frame_i] = field
+            if target["kind"] == "point":
+                fields[name][frame_i] = np.linalg.norm(field, axis=1)
+            else:
+                fields[name][frame_i] = field @ unit
+
+            if args.energy_out:
+                energy = np.zeros(len(q))
+                for atom in atoms:
+                    # The target atoms do not interact with themselves
+                    other = np.flatnonzero(included) != atom
+                    energy[other] += coulomb_energies(positions[atom], charges[atom],
+                                                      pos[other], q[other], box)
+                energies[name][frame_i] = decompose(energy[:, None], comp, solv, n_components)[:, 0]
+
+            if args.verbose:
+                print(f"Frame {frame_i + 1} {name}: Total {fields[name][frame_i][0]:.2f} MV/cm")
+
+    as_dict = lambda data: {name: {c: data[name][:, i].tolist() for i, c in enumerate(components)}
+                            for name in data}
+    result = {"fields": as_dict(fields), "energies": as_dict(energies),
+              "vectors": {name: {c: vectors[name][:, i] for i, c in enumerate(components)}
+                          for name in vectors}}
+    return result
+
+
+def main(argv=None):
+    args = parse_arguments(sys.argv[1:] if argv is None else argv)
+
+    print("-nc             Trajectory file      : ", args.nc)
+    print("-parm           Parameter file       : ", args.parm)
+    print("-target         Field target         : ", args.target)
+    print("-out            Output file          : ", args.out)
+    print("-solvent        Non-protein residues : ", ",".join(args.solvent))
+    print("-exclude_atoms  Atoms excluded       : ",
+          args.exclude_atoms or "Full residue of the first atom of each target")
+    for flag in ("TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
+        if getattr(args, flag):
+            print(f"-{flag:<15}: ", getattr(args, flag))
+    print("\nField calculation RUNNING : ", datetime.datetime.now())
+
+    result = calculate_fields(args)
+
+    with open(args.out, "wb") as f:
+        pickle.dump(result["fields"], f)
+    if args.energy_out:
+        with open(args.energy_out, "wb") as f:
+            pickle.dump(result["energies"], f)
+    if args.vector_out:
+        with open(args.vector_out, "wb") as f:
+            pickle.dump(result["vectors"], f)
+    print("\nField calculation DONE : ", datetime.datetime.now())
+    return result
+
+
+def python_main(args):
+    """Run from Python with a sys.argv-like list (args[0] is the program name)."""
+    return main(list(args[1:]))
+
+
 if __name__ == "__main__":
     main()
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
