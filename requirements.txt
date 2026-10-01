@@ -4,3 +4,4 @@ MDAnalysis
 # pytraj        alternative trajectory reader (-backend pytraj)
 # matplotlib    plots in FieldTools.ipynb
 # pytest        tests
+# MDAnalysisTests  GROMACS .tpr test files

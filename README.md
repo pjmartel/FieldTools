@@ -1,6 +1,7 @@
 # FieldTools
 
-FieldTools.py calculates electric fields from MD trajectories. The script requires standard MD **trajectory** and **parameter** files as input.
+FieldTools.py calculates electric fields from MD trajectories. The script requires standard MD **trajectory** and **parameter** files as input,
+from Amber (`.parm7`/`.prmtop` with `.nc`/`.mdcrd`) or GROMACS (`.tpr`/`.top` with `.xtc`/`.trr`).
 Furthermore a **target** file needs to be provided that specifies the positions at which the field will be calculated.
 
 To test FieldTools, click on: <a target="_blank" href="https://colab.research.google.com/github/bunzela/FieldTools/blob/main/FieldTools.ipynb">
@@ -17,31 +18,51 @@ To test FieldTools, click on: <a target="_blank" href="https://colab.research.go
 
 > [!WARNING]
 > By default, FieldTools calculates the fields from the exact location of all atoms in the system without considering periodicity.
-> Trajectories must thus be imaged, or run FieldTools with `-pbc True` to use the periodic image of every atom closest to the target.
+> Trajectories must thus be imaged, or run FieldTools with `-pbc True` to make all residues whole and place each residue at its periodic image closest to the target.
 
 ### Requirements
 - Python 3
 - numpy
-- MDAnalysis (`pip install mdanalysis`) or pytraj
+- MDAnalysis (`pip install mdanalysis`), or pytraj (Amber files only; no GROMACS `.tpr`)
 
 Install with `pip install -r requirements.txt`.
 
 ### Usage
-    python utils/FieldTools.py -nc <trajectory file>
-                               -parm <parameter file>
+    python utils/FieldTools.py -nc <trajectory file>               (or -traj)
+                               -parm <parameter file>              (or -top)
                                -target <target file>
                                -out <output file>
-                               [-solvent <non-protein residues>]   default: WAT,Na+,Cl-
+                               [-solvent <non-protein residues>]   default: auto
                                [-exclude_atoms <exclusion file>]
                                [-TIP4P <True|False>]
                                [-pbc <True|False>]
                                [-energy_out <energy file>]
                                [-vector_out <vector file>]
                                [-backend <auto|mdanalysis|pytraj>]
+                               [-gmx_include <GROMACS force field directory>]
                                [-verbose <True|False>]
 
 Run `python utils/FieldTools.py -h` for a description of all options.
 `utils/FieldTools_pytraj.py` is equivalent to `utils/FieldTools.py -backend pytraj`.
+
+**Solvent.** With `-solvent auto` (default), common water and ion residue names found in the system
+(e.g. `WAT`, `HOH`, `SOL`, `Na+`, `Cl-`, `NA`, `CL`, `K`) are treated as solvent.
+Give an explicit comma-separated list to include other molecules, such as ligands or lipids.
+
+### GROMACS
+    python utils/FieldTools.py -top topol.tpr -traj traj.xtc -target target.dat -pbc True -out field.pkl
+
+- Use a `.tpr` (recommended) or a `.top` file as topology; both contain the charges, a `.gro` or `.pdb` does not.
+  Files `#include`d by a `.top` are searched next to it and in the GROMACS force field directory
+  (`$GMXLIB`, `$GMXDATA/top`, or the installation of `gmx` found in the `PATH`); set it with `-gmx_include` otherwise.
+- GROMACS trajectories usually contain molecules broken over the periodic boundaries. Use `-pbc True`,
+  or process the trajectory first with `gmx trjconv -pbc mol -center`.
+- Residues are numbered sequentially from 1 over the whole system (as read by MDAnalysis), which can differ from
+  the numbering in your structure files. `-verbose True` prints the residue and atom names of every target.
+- 4-point water models (`OW HW1 HW2 MW`) are recognized by `-TIP4P True`.
+- `.xtc` files store coordinates with a precision of 0.01 Å, which changes fields from nearby atoms by up to about 1%.
+  Use `.trr` files (or a higher `compressed-x-precision`) when this matters.
+- `data/KPC.top` and `data/KPC.xtc` are the Amber example system converted to GROMACS format.
 
 **Exclusions.** Without `-exclude_atoms`, all atoms of the residue of the first target atom are excluded from the field.
 Otherwise, the exclusion file contains one line per target (or a single line used for all targets) listing atoms
@@ -62,8 +83,10 @@ The target atom of a point target is always excluded.
 - `-energy_out` saves the Coulomb interaction energy (kJ/mol) between the target atom(s) and the environment, with the same structure.
 
 ### Tests
-    pip install pytest
+    pip install pytest MDAnalysisTests
     python -m pytest tests
+
+`MDAnalysisTests` provides the GROMACS `.tpr` test system; without it, those tests are skipped.
 
 `data/KPC_field.pkl` holds bond and point fields of the example system computed with the original FieldTools
 (which used 5140 MV/cm per atomic unit instead of 5142.2, and the signed sum −q/r² for point targets);

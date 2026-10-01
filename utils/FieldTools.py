@@ -12,6 +12,7 @@ import argparse
 import datetime
 import os
 import pickle
+import shutil
 import sys
 import warnings
 
@@ -23,6 +24,14 @@ AU_FIELD_MV_CM = 5142.20674763              # 1 a.u. of electric field in MV/cm
 HARTREE_KJ_MOL = 2625.4996394799            # 1 Hartree in kJ/mol
 FIELD_CONST = AU_FIELD_MV_CM * BOHR**2      # q [e] / r^2 [A^2]   -> MV/cm
 ENERGY_CONST = HARTREE_KJ_MOL * BOHR        # q*Q [e^2] / r [A]  -> kJ/mol
+
+### Residue names treated as solvent with -solvent auto (Amber, GROMACS and CHARMM conventions)
+WATER_NAMES = ["WAT", "HOH", "SOL", "TIP3", "TIP4", "TIP5", "SPC", "T3P", "T4P", "T5P"]
+ION_NAMES = ["Na+", "Cl-", "K+", "Li+", "Rb+", "Cs+", "Mg2+", "Ca2+", "Zn2+", "Br-", "F-", "I-",
+             "NA", "CL", "K", "LI", "RB", "CS", "MG", "CA", "ZN", "BR", "F", "I",
+             "NA+", "CL-", "MG2", "CA2", "SOD", "CLA", "POT", "CAL", "CES", "LIT"]
+### Massless charged sites of 4-point water models (Amber EPW, GROMACS MW)
+EXTRA_POINT_NAMES = ["EPW", "EP", "MW"]
 
 TARGET_HELP = """
 Target file (-target):
@@ -48,7 +57,13 @@ Output (-out): pickled dictionary
   For point targets, each component is the magnitude of that component's field
   vector, so magnitudes of the components do not add up to the Total.
 
-Trajectories must be imaged unless -pbc True is used.
+Trajectories must be imaged unless -pbc True is used. GROMACS trajectories usually
+contain molecules broken over the periodic boundaries: use -pbc True, or process them
+first with gmx trjconv -pbc mol -center.
+
+GROMACS: use a .tpr (recommended) or a .top file with -parm. Files #included by a
+.top are searched next to it and in -gmx_include. Residues are numbered sequentially
+from 1 over the whole system, as read by MDAnalysis (check with -verbose True).
 """
 
 
@@ -79,19 +94,26 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
-    parser.add_argument("-nc", required=True, help="trajectory file")
-    parser.add_argument("-parm", required=True, help="parameter (topology) file")
+    parser.add_argument("-nc", "-traj", dest="nc", required=True,
+                        help="trajectory file (Amber .nc/.mdcrd, GROMACS .xtc/.trr, ...)")
+    parser.add_argument("-parm", "-top", dest="parm", required=True,
+                        help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top)")
     parser.add_argument("-target", required=True, help="target file (see below)")
     parser.add_argument("-out", required=True, help="output file for the fields (.pkl)")
-    parser.add_argument("-solvent", default="WAT,Na+,Cl-",
-                        help="comma separated list of non-protein residue names [default: %(default)s]")
+    parser.add_argument("-solvent", default="auto",
+                        help="comma separated list of non-protein residue names, or auto to use the "
+                             "common water and ion residue names found in the system [default: auto]")
+    parser.add_argument("-gmx_include", type=optional_path, default=None,
+                        help="directory with the files #included by a GROMACS .top (force field "
+                             "directories) [default: $GMXLIB, $GMXDATA/top, or the GROMACS installation of gmx]")
     parser.add_argument("-exclude_atoms", type=optional_path, default=None,
                         help="file with atoms excluded from the field calculation (see below)")
     parser.add_argument("-TIP4P", type=str2bool, default=False,
                         help="system uses a 4-point water model (WAT with EPW) [default: False]")
     parser.add_argument("-pbc", type=str2bool, default=False,
-                        help="use the periodic image of every atom closest to the target, "
-                             "so the trajectory does not have to be imaged [default: False]")
+                        help="make residues whole and place every residue at its periodic image "
+                             "closest to the target, so the trajectory does not have to be imaged "
+                             "[default: False]")
     parser.add_argument("-energy_out", type=optional_path, default=None,
                         help="also write the Coulomb interaction energy (kJ/mol) between the "
                              "target atom(s) and the environment to this file (.pkl)")
@@ -118,7 +140,7 @@ def parse_arguments(argv):
     args = parser.parse_args(argv)
     if args.use_qm_charges and (args.qm_charges is None or args.qm_dict is None):
         parser.error("-use_qm_charges True requires -qm_charges and -qm_dict")
-    args.solvent = [i for i in args.solvent.split(",") if i]
+    args.solvent = None if args.solvent == "auto" else [i for i in args.solvent.split(",") if i]
     return args
 
 
@@ -149,11 +171,57 @@ class System:
         return self._frames()
 
 
-def load_mdanalysis(parm, nc):
+def is_gromacs_top(parm):
+    """GROMACS .top files share their extension with Amber topologies (which start with %VERSION)."""
+    extension = os.path.splitext(parm)[1].lower()
+    if extension == ".itp":
+        return True
+    if extension != ".top":
+        return False
+    with open(parm) as f:
+        for line in f:
+            if line.strip():
+                return not line.startswith(("%VERSION", "%FLAG"))
+    return False
+
+
+def gromacs_include_dir():
+    """Directory with the GROMACS force fields, for #include statements in .top files."""
+    candidates = os.environ.get("GMXLIB", "").split(os.pathsep)
+    if os.environ.get("GMXDATA"):
+        candidates.append(os.path.join(os.environ["GMXDATA"], "top"))
+    for gmx in ("gmx", "gmx_mpi", "gmx_d"):
+        executable = shutil.which(gmx)
+        if executable:
+            prefix = os.path.dirname(os.path.dirname(os.path.realpath(executable)))
+            candidates.append(os.path.join(prefix, "share", "gromacs", "top"))
+    candidates.append("/usr/local/gromacs/share/gromacs/top")
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def load_mdanalysis(parm, nc, gmx_include=None):
     import MDAnalysis as mda
+    kwargs = {}
+    if is_gromacs_top(parm):
+        kwargs["topology_format"] = "ITP"
+        include_dir = gmx_include or gromacs_include_dir()
+        if include_dir:
+            kwargs["include_dir"] = include_dir
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=UserWarning)
-        u = mda.Universe(parm, nc)
+        warnings.simplefilter("ignore", category=DeprecationWarning)
+        try:
+            u = mda.Universe(parm, nc, **kwargs)
+        except (IOError, ValueError) as error:
+            hint = ""
+            if "topology_format" in kwargs and "Could not find" in str(error):
+                hint = "\nSet the directory with the GROMACS force fields with -gmx_include."
+            sys.exit(f"Error! Could not read topology {parm} with trajectory {nc}:\n{error}{hint}")
+    if not hasattr(u.atoms, "charges"):
+        sys.exit(f"Error! {parm} contains no partial charges. Use a topology file such as .parm7, .tpr or .top.")
     atoms = u.atoms
 
     def frames():
@@ -167,6 +235,8 @@ def load_mdanalysis(parm, nc):
 
 def load_pytraj(parm, nc):
     import pytraj as pt
+    if parm.lower().endswith(".tpr"):
+        sys.exit("Error! pytraj cannot read GROMACS .tpr files; use -backend mdanalysis.")
     traj = pt.iterload(nc, parm)
     top = traj.topology
     residues = list(top.residues)
@@ -183,10 +253,10 @@ def load_pytraj(parm, nc):
                   top.charge, traj.n_frames, frames)
 
 
-def load_system(parm, nc, backend="auto"):
+def load_system(parm, nc, backend="auto", gmx_include=None):
     if backend in ("auto", "mdanalysis"):
         try:
-            return load_mdanalysis(parm, nc)
+            return load_mdanalysis(parm, nc, gmx_include)
         except ImportError:
             if backend == "mdanalysis":
                 raise
@@ -266,11 +336,11 @@ def load_exclusions(exclude_file, targets, system):
 
 
 def tip4p_oxygens(system):
-    """Mask of the (massless, uncharged) oxygens of 4-point waters; EPW follows O, H1, H2."""
-    extra_points = np.flatnonzero((system.names == "EPW") & (system.resnames == "WAT"))
+    """Mask of the (uncharged) oxygens of 4-point waters; the extra point follows O, H1, H2."""
+    extra_points = np.flatnonzero(np.isin(system.names, EXTRA_POINT_NAMES) & np.isin(system.resnames, WATER_NAMES))
     oxygens = extra_points - 3
     if len(extra_points) == 0 or np.any(oxygens < 0) or np.any(system.resids[oxygens] != system.resids[extra_points]):
-        sys.exit("Error! -TIP4P True, but no WAT residues with atom order O, H1, H2, EPW were found.")
+        sys.exit("Error! -TIP4P True, but no water residues with atom order O, H1, H2, EPW (or OW, HW1, HW2, MW) were found.")
     mask = np.zeros(system.n_atoms, dtype=bool)
     mask[oxygens] = True
     return mask
@@ -279,6 +349,13 @@ def tip4p_oxygens(system):
 #####################################################################################
 ### Field components
 #####################################################################################
+
+def detect_solvent(system):
+    """Common water and ion residue names present in the system, in topology order."""
+    known = set(WATER_NAMES) | set(ION_NAMES)
+    _, first = np.unique(system.resnames, return_index=True)
+    return [str(name) for name in system.resnames[np.sort(first)] if name in known]
+
 
 def field_components(system, solvent):
     """Component names and, per atom, the index of its residue component."""
@@ -321,29 +398,57 @@ def box_matrix(dimensions):
     return np.array([[a, 0.0, 0.0], [bx, by, 0.0], [cx, cy, cz]])
 
 
+NEIGHBOUR_CELLS = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)], dtype=np.float64)
+
+
 def minimum_image(vectors, box):
-    """Wrap displacement vectors into the unit cell centred on the origin."""
+    """Shortest periodic image of each displacement vector."""
     fractional = vectors @ np.linalg.inv(box)
     fractional -= np.round(fractional)
-    return fractional @ box
+    wrapped = fractional @ box
+    if not np.any(box[np.tril_indices(3, -1)]):
+        return wrapped   # Rectangular box: wrapping gives the minimum image
+    # Triclinic box (e.g. truncated octahedron, rhombic dodecahedron): the shortest
+    # image is the wrapped vector or one shifted into a neighbouring cell
+    candidates = wrapped[:, None, :] + (NEIGHBOUR_CELLS @ box)[None, :, :]
+    shortest = np.argmin(np.einsum("ijk,ijk->ij", candidates, candidates), axis=1)
+    return candidates[np.arange(len(vectors)), shortest]
 
 
-def displacements(point, positions, box):
-    """Vectors pointing from every atom to `point`."""
+def residue_first_atoms(system):
+    """Index of the first atom of its residue, for every atom."""
+    new_residue = np.r_[True, (system.resids[1:] != system.resids[:-1]) |
+                              (system.resnames[1:] != system.resnames[:-1])]
+    starts = np.flatnonzero(new_residue)
+    return np.repeat(starts, np.diff(np.r_[starts, system.n_atoms]))
+
+
+def make_whole(positions, first_atoms, box):
+    """Join residues broken over the periodic boundaries."""
+    return positions[first_atoms] + minimum_image(positions - positions[first_atoms], box)
+
+
+def displacements(point, positions, box=None, first_atoms=None):
+    """Vectors pointing from every atom to `point`.
+
+    With a box, every (whole) residue is moved as a unit to the periodic image
+    whose first atom is closest to `point`, so no molecule is split.
+    """
     vectors = point - positions
-    return vectors if box is None else minimum_image(vectors, box)
+    if box is None:
+        return vectors
+    reference = vectors[first_atoms]
+    return vectors + minimum_image(reference, box) - reference
 
 
-def field_vectors(point, positions, charges, box):
-    """Field (MV/cm) of each charge at `point`: E = k*q*r_vec/r^3."""
-    vectors = displacements(point, positions, box)
+def field_vectors(vectors, charges):
+    """Field (MV/cm) at the end of each vector from a charge at its start: E = k*q*r_vec/r^3."""
     r = np.sqrt(np.einsum("ij,ij->i", vectors, vectors))
     return FIELD_CONST * (charges / r**3)[:, None] * vectors
 
 
-def coulomb_energies(point, target_charge, positions, charges, box):
-    """Coulomb energy (kJ/mol) of a charge at `point` with each charge: U = k*q*Q/r."""
-    vectors = displacements(point, positions, box)
+def coulomb_energies(vectors, target_charge, charges):
+    """Coulomb energy (kJ/mol) of a target charge with each charge at distance |vector|: U = k*q*Q/r."""
     r = np.sqrt(np.einsum("ij,ij->i", vectors, vectors))
     return ENERGY_CONST * target_charge * charges / r
 
@@ -394,7 +499,10 @@ def qm_frame_charges(charges, qm_frames, qm_index, frame_i):
 #####################################################################################
 
 def calculate_fields(args):
-    system = load_system(args.parm, args.nc, args.backend)
+    system = load_system(args.parm, args.nc, args.backend, args.gmx_include)
+    if args.solvent is None:
+        args.solvent = detect_solvent(system)
+        print("-solvent        Detected solvent     : ", ",".join(args.solvent) or "none")
     targets = load_targets(args.target, system)
     load_exclusions(args.exclude_atoms, targets, system)
     components, atom_component, is_solvent = field_components(system, args.solvent)
@@ -407,9 +515,12 @@ def calculate_fields(args):
     if args.verbose:
         print(f"Atoms: {system.n_atoms}  Frames: {system.n_frames}  Components: {n_components}")
         for target in targets:
-            print(f"Target {target['name']} ({target['kind']}): atoms {target['atoms']}, "
+            atoms = ", ".join(f"{system.resnames[i]} {system.resids[i]} {system.names[i]} (index {i})"
+                              for i in target["atoms"])
+            print(f"Target {target['name']} ({target['kind']}): {atoms}; "
                   f"{int(target['excluded'].sum())} atoms excluded")
 
+    first_atoms = residue_first_atoms(system)
     fields = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
     vectors = {t["name"]: np.zeros((system.n_frames, n_components, 3)) for t in targets}
     energies = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
@@ -419,6 +530,7 @@ def calculate_fields(args):
             if box is None:
                 sys.exit("Error! -pbc True, but the trajectory has no box information.")
             box = box_matrix(box)
+            positions = make_whole(positions, first_atoms, box)
         else:
             box = None
         charges = system.charges
@@ -428,17 +540,20 @@ def calculate_fields(args):
         for target in targets:
             name, atoms = target["name"], target["atoms"]
             included = ~(target["excluded"] | ignored)
-            pos, q = positions[included], charges[included]
+            q = charges[included]
             comp, solv = atom_component[included], is_solvent[included]
 
             if target["kind"] == "point":
                 point = positions[atoms[0]]
             else:
-                bond = displacements(positions[atoms[1]], positions[atoms[0]][None, :], box)[0]
+                bond = positions[atoms[1]] - positions[atoms[0]]
+                if box is not None:
+                    bond = minimum_image(bond[None, :], box)[0]
                 point = positions[atoms[0]] + bond / 2
                 unit = bond / np.linalg.norm(bond)
 
-            field = decompose(field_vectors(point, pos, q, box), comp, solv, n_components)
+            r_vectors = displacements(point, positions, box, first_atoms)[included]
+            field = decompose(field_vectors(r_vectors, q), comp, solv, n_components)
             vectors[name][frame_i] = field
             if target["kind"] == "point":
                 fields[name][frame_i] = np.linalg.norm(field, axis=1)
@@ -450,8 +565,8 @@ def calculate_fields(args):
                 for atom in atoms:
                     # The target atoms do not interact with themselves
                     other = np.flatnonzero(included) != atom
-                    energy[other] += coulomb_energies(positions[atom], charges[atom],
-                                                      pos[other], q[other], box)
+                    r_atom = displacements(positions[atom], positions, box, first_atoms)[included]
+                    energy[other] += coulomb_energies(r_atom[other], charges[atom], q[other])
                 energies[name][frame_i] = decompose(energy[:, None], comp, solv, n_components)[:, 0]
 
             if args.verbose:
@@ -472,10 +587,10 @@ def main(argv=None):
     print("-parm           Parameter file       : ", args.parm)
     print("-target         Field target         : ", args.target)
     print("-out            Output file          : ", args.out)
-    print("-solvent        Non-protein residues : ", ",".join(args.solvent))
+    print("-solvent        Non-protein residues : ", ",".join(args.solvent) if args.solvent else "auto")
     print("-exclude_atoms  Atoms excluded       : ",
           args.exclude_atoms or "Full residue of the first atom of each target")
-    for flag in ("TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
+    for flag in ("gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
         if getattr(args, flag):
             print(f"-{flag:<15}: ", getattr(args, flag))
     print("\nField calculation RUNNING : ", datetime.datetime.now())
