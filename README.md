@@ -4,7 +4,7 @@ FieldTools.py calculates electric fields from MD trajectories. The script requir
 from Amber (`.parm7`/`.prmtop` with `.nc`/`.mdcrd`) or GROMACS (`.tpr`/`.top` with `.xtc`/`.trr`).
 Furthermore a **target** file needs to be provided that specifies the positions at which the field will be calculated.
 
-To test FieldTools, click on: <a target="_blank" href="https://colab.research.google.com/github/bunzela/FieldTools/blob/main/FieldTools.ipynb">
+To test FieldTools, click on: <a target="_blank" href="https://colab.research.google.com/github/pjmartel/FieldTools/blob/main/FieldTools.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
 

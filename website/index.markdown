@@ -9,7 +9,7 @@ nav_order: 1
 FieldTools calculates electric fields from MD trajectories, at selected atoms or projected onto selected bonds,
 and decomposes them into the contributions of each protein residue and solvent species.
 
-[Open the tutorial in Google Colab](https://colab.research.google.com/github/bunzela/FieldTools/blob/main/FieldTools.ipynb)
+[Open the tutorial in Google Colab](https://colab.research.google.com/github/pjmartel/FieldTools/blob/main/FieldTools.ipynb)
 · [Source code and documentation](https://github.com/bunzela/FieldTools)
 
 ## Quick start
