@@ -269,3 +269,21 @@ def test_charge_report(kpc, tmp_path, capsys):
     charge, n_residues, label = result["charges"]["Groups"]["Na+"]
     assert (round(charge, 3), n_residues, label) == (2.0, 2, "resid 262,263")
     assert "Na+" in capsys.readouterr().out
+
+
+def test_filter_statistics_cover_all_frames(tmp_path, universe, capsys):
+    o71 = universe.select_atoms("resid 40 and name O71")[0].index
+    water = universe.select_atoms("resid 264 and name O")[0].index
+    distances = [np.linalg.norm(universe.atoms.positions[o71] - universe.atoms.positions[water])
+                 for ts in universe.trajectory]
+    result = run(tmp_path, [":40@O71"], [EXCLUDE],
+                 ["-filter_distance", ":40@O71", ":264@O", "0.5",
+                  "-filter_angle", ":264@O", ":40@C7", ":40@O71", "0"])
+    distance, angle = result["filter_stats"]
+    assert result["frames"] == []
+    assert distance["min"] == pytest.approx(min(distances), abs=1e-3)
+    assert distance["max"] == pytest.approx(max(distances), abs=1e-3)
+    assert (distance["passed"], angle["passed"]) == (0, len(distances))
+    output = capsys.readouterr().out
+    assert f"Filter values over all {len(distances)} frames" in output
+    assert "passed by 0 frames" in output

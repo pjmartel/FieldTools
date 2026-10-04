@@ -60,6 +60,8 @@ A single value is a maximum distance or a minimum angle; `MIN:MAX` gives a range
 Both options can be repeated, and a frame must pass all filters. With `-pbc True`, distances and angles use the
 nearest periodic images. The output then only contains the kept frames, and `<out>_frames.dat` lists their
 frame numbers with the measured distances and angles.
+Each run also prints the range of every filter's values over the whole trajectory and how many frames pass
+each filter on its own, which helps to choose cutoffs and to see which filter removes the frames.
 
 **Charges.** At the start of every run, FieldTools prints the total charge of the system (with a warning if it is
 not an integer), of each segment (chains and molecules in GROMACS topologies), of the protein, of each hetero

@@ -469,6 +469,35 @@ def measure(geometry_filter, positions, box):
     return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
+def filter_statistics(filters, all_values):
+    """Range of each filter's values over all frames and how many frames pass it on its own."""
+    if not filters:
+        return []
+    values = np.array(all_values, dtype=np.float64).reshape(-1, len(filters))
+    stats = []
+    for i, f in enumerate(filters):
+        column = values[:, i]
+        stats.append({"kind": f["kind"], "label": f["label"], "low": f["low"], "high": f["high"],
+                      "min": float(column.min()) if len(column) else None,
+                      "max": float(column.max()) if len(column) else None,
+                      "passed": int(((column >= f["low"]) & (column <= f["high"])).sum())})
+    return stats
+
+
+def print_filter_statistics(stats, n_frames):
+    print(f"\nFilter values over all {n_frames} frames:")
+    for s in stats:
+        unit = "A" if s["kind"] == "distance" else "deg"
+        if s["kind"] == "distance" and s["low"] == 0.0:
+            condition = f"<= {s['high']:g}"
+        elif s["kind"] == "angle" and s["high"] == 180.0:
+            condition = f">= {s['low']:g}"
+        else:
+            condition = f"{s['low']:g} to {s['high']:g}"
+        measured = "no frames" if s["min"] is None else f"{s['min']:8.3f} to {s['max']:8.3f} {unit:<3}"
+        print(f"  {s['kind']:<8} {s['label']:<32} {measured}   (filter {condition}: passed by {s['passed']} frames)")
+
+
 #####################################################################################
 ### Field components
 #####################################################################################
@@ -654,6 +683,7 @@ def calculate_fields(args):
     vectors = {t["name"]: [] for t in targets}
     energies = {t["name"]: [] for t in targets}
     kept_frames, filter_values = [], []
+    all_values = []   # every frame's filter values, to report their ranges
 
     for frame_i, (positions, box) in enumerate(system.frames()):
         if args.pbc:
@@ -665,6 +695,7 @@ def calculate_fields(args):
             box = None
 
         values = [measure(f, positions, box) for f in filters]
+        all_values.append(values)
         if not all(f["low"] <= v <= f["high"] for f, v in zip(filters, values)):
             continue
         kept_frames.append(frame_i + 1)
@@ -708,7 +739,9 @@ def calculate_fields(args):
             if args.verbose:
                 print(f"Frame {frame_i + 1} {name}: Total {fields[name][-1][0]:.2f} MV/cm")
 
+    filter_stats = filter_statistics(filters, all_values)
     if filters:
+        print_filter_statistics(filter_stats, len(all_values))
         print(f"Frames passing the filters: {len(kept_frames)} of {system.n_frames}")
         if not kept_frames:
             print("Warning! No frame passes the filters; the output contains no data.")
@@ -724,6 +757,7 @@ def calculate_fields(args):
               "vectors": {name: {c: vectors[name][:, i] for i, c in enumerate(components)}
                           for name in vectors},
               "frames": kept_frames, "filters": filters, "filter_values": filter_values,
+              "filter_stats": filter_stats,
               "charges": charges_summary}
     return result
 
