@@ -560,16 +560,23 @@ NEIGHBOUR_CELLS = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) fo
 
 def minimum_image(vectors, box):
     """Shortest periodic image of each displacement vector."""
-    fractional = vectors @ np.linalg.inv(box)
+    inverse = np.linalg.inv(box)
+    fractional = vectors @ inverse
     fractional -= np.round(fractional)
     wrapped = fractional @ box
     if not np.any(box[np.tril_indices(3, -1)]):
         return wrapped   # Rectangular box: wrapping gives the minimum image
-    # Triclinic box (e.g. truncated octahedron, rhombic dodecahedron): the shortest
-    # image is the wrapped vector or one shifted into a neighbouring cell
-    candidates = wrapped[:, None, :] + (NEIGHBOUR_CELLS @ box)[None, :, :]
-    shortest = np.argmin(np.einsum("ijk,ijk->ij", candidates, candidates), axis=1)
-    return candidates[np.arange(len(vectors)), shortest]
+    # Triclinic box (e.g. truncated octahedron, rhombic dodecahedron): every lattice vector is
+    # at least as long as the smallest distance between opposite faces, so a wrapped vector no
+    # longer than half of it is already the shortest image. Only longer ones can be shorter in
+    # a neighbouring cell.
+    half_width = 0.5 / np.linalg.norm(inverse, axis=0).max()
+    far = np.flatnonzero(np.einsum("ij,ij->i", wrapped, wrapped) > half_width**2)
+    if len(far):
+        candidates = wrapped[far, None, :] + (NEIGHBOUR_CELLS @ box)[None, :, :]
+        shortest = np.argmin(np.einsum("ijk,ijk->ij", candidates, candidates), axis=1)
+        wrapped[far] = candidates[np.arange(len(far)), shortest]
+    return wrapped
 
 
 def residue_first_atoms(system):
@@ -580,12 +587,22 @@ def residue_first_atoms(system):
     return np.repeat(starts, np.diff(np.r_[starts, system.n_atoms]))
 
 
-def make_whole(positions, first_atoms, box):
+class Residues:
+    """Residue membership of the atoms, for moving whole residues across the periodic boundaries."""
+
+    def __init__(self, first_atoms):
+        self.first_atoms = first_atoms                          # per atom: first atom of its residue
+        self.starts = np.unique(first_atoms)                    # first atom of each residue
+        self.index = np.searchsorted(self.starts, first_atoms)  # per atom: index of its residue
+
+
+def make_whole(positions, residues, box):
     """Join residues broken over the periodic boundaries."""
-    return positions[first_atoms] + minimum_image(positions - positions[first_atoms], box)
+    first = positions[residues.first_atoms]
+    return first + minimum_image(positions - first, box)
 
 
-def displacements(point, positions, box=None, first_atoms=None):
+def displacements(point, positions, box=None, residues=None):
     """Vectors pointing from every atom to `point`.
 
     With a box, every (whole) residue is moved as a unit to the periodic image
@@ -594,8 +611,9 @@ def displacements(point, positions, box=None, first_atoms=None):
     vectors = point - positions
     if box is None:
         return vectors
-    reference = vectors[first_atoms]
-    return vectors + minimum_image(reference, box) - reference
+    reference = vectors[residues.starts]
+    shift = minimum_image(reference, box) - reference
+    return vectors + shift[residues.index]
 
 
 def field_vectors(vectors, charges):
@@ -661,6 +679,7 @@ def calculate_fields(args):
         args.solvent = detect_solvent(system)
         print("-solvent        Detected solvent     : ", ",".join(args.solvent) or "none")
     first_atoms = residue_first_atoms(system)
+    residues = Residues(first_atoms)
     charges_summary = charge_report(system, args.solvent, first_atoms)
     print_charge_report(charges_summary)
     targets = load_targets(args.target, system)
@@ -695,7 +714,7 @@ def calculate_fields(args):
             if box is None:
                 sys.exit("Error! -pbc True, but the trajectory has no box information.")
             box = box_matrix(box)
-            positions = make_whole(positions, first_atoms, box)
+            positions = make_whole(positions, residues, box)
         else:
             box = None
 
@@ -725,7 +744,7 @@ def calculate_fields(args):
                 point = positions[atoms[0]] + bond / 2
                 unit = bond / np.linalg.norm(bond)
 
-            r_vectors = displacements(point, positions, box, first_atoms)[included]
+            r_vectors = displacements(point, positions, box, residues)[included]
             field = decompose(field_vectors(r_vectors, q), comp, solv, n_components)
             vectors[name].append(field)
             fields[name].append(np.linalg.norm(field, axis=1) if target["kind"] == "point" else field @ unit)
@@ -735,7 +754,7 @@ def calculate_fields(args):
                 for atom in atoms:
                     # The target atoms do not interact with themselves
                     other = np.flatnonzero(included) != atom
-                    r_atom = displacements(positions[atom], positions, box, first_atoms)[included]
+                    r_atom = displacements(positions[atom], positions, box, residues)[included]
                     energy[other] += coulomb_energies(r_atom[other], charges[atom], q[other])
                 energies[name].append(decompose(energy[:, None], comp, solv, n_components)[:, 0])
             else:
