@@ -55,6 +55,10 @@ Give an explicit comma-separated list to include other molecules, such as ligand
 - Use a `.tpr` (recommended) or a `.top` file as topology; both contain the charges, a `.gro` or `.pdb` does not.
   Files `#include`d by a `.top` are searched next to it and in the GROMACS force field directory
   (`$GMXLIB`, `$GMXDATA/top`, or the installation of `gmx` found in the `PATH`); set it with `-gmx_include` otherwise.
+- Each MDAnalysis release reads `.tpr` files up to a certain GROMACS version (MDAnalysis 2.10 reads up to GROMACS 2025).
+  For newer files (e.g. GROMACS 2026, "tpx version 138"), install the development version of MDAnalysis
+  (`pip install "git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package"`),
+  or write a self-contained topology with `gmx grompp ... -pp processed.top` and use that instead.
 - GROMACS trajectories usually contain molecules broken over the periodic boundaries. Use `-pbc True`,
   or process the trajectory first with `gmx trjconv -pbc mol -center`.
 - Residues are numbered sequentially from 1 over the whole system (as read by MDAnalysis), which can differ from

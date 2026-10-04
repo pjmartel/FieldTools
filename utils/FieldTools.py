@@ -219,6 +219,12 @@ def load_mdanalysis(parm, nc, gmx_include=None):
             hint = ""
             if "topology_format" in kwargs and "Could not find" in str(error):
                 hint = "\nSet the directory with the GROMACS force fields with -gmx_include."
+            if "tpx version" in str(error):
+                hint = (f"\nThis .tpr was written by a GROMACS version that MDAnalysis {mda.__version__} cannot read. "
+                        "Either install the development version of MDAnalysis:\n"
+                        "  pip install \"git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package\"\n"
+                        "or use a self-contained topology instead of the .tpr:\n"
+                        "  gmx grompp -f md.mdp -c conf.gro -p topol.top -pp processed.top")
             sys.exit(f"Error! Could not read topology {parm} with trajectory {nc}:\n{error}{hint}")
     if not hasattr(u.atoms, "charges"):
         sys.exit(f"Error! {parm} contains no partial charges. Use a topology file such as .parm7, .tpr or .top.")
