@@ -5,3 +5,7 @@ data/field.pkl
 # MDAnalysis trajectory offset caches
 .*_offsets.npz
 .*_offsets.lock
+build/
+dist/
+*.egg-info/
+.venv/

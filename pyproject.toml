@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fieldtools"
+version = "1.0.0"
+description = "Electric fields from molecular dynamics trajectories (Amber and GROMACS)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Adrian Bunzel" }]
+maintainers = [{ name = "Paulo Martel" }]
+dependencies = [
+    "numpy",
+    "MDAnalysis>=2.8",
+]
+classifiers = [
+    # This fork is installed from its repository only. PyPI rejects uploads with this
+    # classifier; publishing is up to the authors of the original FieldTools.
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "MDAnalysisTests"]
+notebook = ["matplotlib"]
+# Development version of MDAnalysis, needed for .tpr files from GROMACS 2026 (tpx 138).
+# Built from source (needs git and a C compiler). Remove once MDAnalysis 2.11 is released.
+mdanalysis-dev = [
+    "MDAnalysis @ git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package",
+]
+
+[project.scripts]
+fieldtools = "fieldtools.fields:cli"
+qmchargestools = "fieldtools.qmcharges:main"
+
+[project.urls]
+Repository = "https://github.com/pjmartel/FieldTools"
+Original = "https://github.com/bunzela/FieldTools"
+
+[tool.hatch.metadata]
+# Allows the git dependency of the mdanalysis-dev extra (local installs only; never uploaded to PyPI)
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fieldtools"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "utils", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

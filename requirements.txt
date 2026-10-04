@@ -1,9 +1,0 @@
-numpy
-MDAnalysis
-# For .tpr files from GROMACS 2026 or newer, install the development version instead:
-#   pip install "git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package"
-# Optional:
-# pytraj        alternative trajectory reader (-backend pytraj)
-# matplotlib    plots in FieldTools.ipynb
-# pytest        tests
-# MDAnalysisTests  GROMACS .tpr test files

@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""FieldTools using pytraj to read the trajectory.
-
-Kept for compatibility: equivalent to `python utils/FieldTools.py ... -backend pytraj`.
-"""
+"""Compatibility wrapper: same as `fieldtools ... -backend pytraj` (see README.md)."""
 
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import FieldTools
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+from fieldtools.fields import main  # noqa: E402
 
 
 def python_main(args):
-    return FieldTools.main(list(args[1:]) + ["-backend", "pytraj"])
+    return main(list(args[1:]) + ["-backend", "pytraj"])
 
 
 if __name__ == "__main__":
-    FieldTools.main(sys.argv[1:] + ["-backend", "pytraj"])
+    main(sys.argv[1:] + ["-backend", "pytraj"])

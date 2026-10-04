@@ -14,9 +14,11 @@ and decomposes them into the contributions of each protein residue and solvent s
 
 ## Quick start
 
-    pip install -r requirements.txt
-    python utils/FieldTools.py -nc data/KPC.nc -parm data/KPC.parm7 \
-                               -target data/field_target.dat -solvent WAT,Na+ \
-                               -TIP4P True -out field.pkl
+    git clone https://github.com/pjmartel/FieldTools
+    cd FieldTools
+    pip install -e .
+    fieldtools -nc data/KPC.nc -parm data/KPC.parm7 \
+               -target data/field_target.dat -solvent WAT,Na+ \
+               -TIP4P True -out field.pkl
 
-Run `python utils/FieldTools.py -h` for all options.
+Run `fieldtools -h` for all options.
