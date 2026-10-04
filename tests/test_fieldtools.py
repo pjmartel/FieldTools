@@ -193,3 +193,79 @@ def test_qm_charges_replace_topology_charges(tmp_path, universe, kpc):
     np.testing.assert_allclose(np.array(zeroed["fields"][BOND]["Total"]),
                                np.array(kpc["fields"][BOND]["Total"]) - np.array(kpc["fields"][BOND][residue]),
                                rtol=1e-6)
+
+
+def test_distance_filter_keeps_matching_frames(tmp_path, kpc, universe):
+    o71 = universe.select_atoms("resid 40 and name O71")[0].index
+    water = universe.select_atoms("resid 264 and name O")[0].index
+    distances = []
+    for ts in universe.trajectory:
+        distances.append(np.linalg.norm(universe.atoms.positions[o71] - universe.atoms.positions[water]))
+    cutoff = float(np.median(distances))
+    expected = [i + 1 for i, d in enumerate(distances) if d <= cutoff]
+    assert 0 < len(expected) < len(distances)
+
+    result = run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE],
+                 ["-filter_distance", ":40@O71", ":264@O", f"{cutoff:.6f}"])
+    assert result["frames"] == expected
+    for target in (BOND, POINT):
+        for component in ("Total", "Protein", "WAT"):
+            np.testing.assert_allclose(result["fields"][target][component],
+                                       [kpc["fields"][target][component][i - 1] for i in expected])
+    with open(tmp_path / "field_frames.dat") as f:
+        lines = f.read().splitlines()
+    assert lines[0].startswith("# frame distance::40@O71-:264@O")
+    assert [int(line.split()[0]) for line in lines[1:]] == expected
+    np.testing.assert_allclose([float(line.split()[1]) for line in lines[1:]],
+                               [distances[i - 1] for i in expected], atol=1e-3)
+
+
+def test_angle_filter_and_combined_filters(tmp_path, universe):
+    def angle(a, b, c):
+        u_, v_ = a - b, c - b
+        return np.degrees(np.arccos(np.dot(u_, v_) / (np.linalg.norm(u_) * np.linalg.norm(v_))))
+
+    sel = {n: universe.select_atoms(s)[0].index for n, s in
+           [("O", "resid 264 and name O"), ("C7", "resid 40 and name C7"), ("O71", "resid 40 and name O71")]}
+    angles = []
+    for ts in universe.trajectory:
+        p = universe.atoms.positions.astype(np.float64)
+        angles.append(angle(p[sel["O"]], p[sel["C7"]], p[sel["O71"]]))
+    low, high = np.percentile(angles, [20, 80])
+    expected = [i + 1 for i, a in enumerate(angles) if low <= a <= high]
+
+    result = run(tmp_path, [":40@O71"], [EXCLUDE],
+                 ["-filter_angle", ":264@O", ":40@C7", ":40@O71", f"{low:.6f}:{high:.6f}"])
+    assert result["frames"] == expected
+
+    # A second, impossible filter removes every frame
+    empty = run(tmp_path, [":40@O71"], [EXCLUDE],
+                ["-filter_angle", ":264@O", ":40@C7", ":40@O71", f"{low:.6f}:{high:.6f}",
+                 "-filter_distance", ":40@O71", ":264@O", "0.5"])
+    assert empty["frames"] == []
+    assert empty["fields"][POINT]["Total"] == []
+
+
+@pytest.mark.parametrize("cutoff, message", [("abc", "Invalid distance cutoff"), ("3:2", "MIN is larger")])
+def test_invalid_filter_cutoff(tmp_path, cutoff, message):
+    with pytest.raises(SystemExit) as error:
+        run(tmp_path, [":40@O71"], [EXCLUDE], ["-filter_distance", ":40@O71", ":264@O", cutoff])
+    assert message in str(error.value)
+
+
+def test_charge_report(kpc, tmp_path, capsys):
+    report = kpc["charges"]
+    assert report["Total"] == pytest.approx(0.0, abs=1e-4)
+    assert report["Groups"]["Protein"][0] == pytest.approx(-2.0, abs=1e-4)
+    assert report["Groups"]["Protein"][1] == 261          # includes the acylated serine ACA 40
+    assert report["Groups"]["Na+"][:2] == (pytest.approx(2.0, abs=1e-4), 2)
+    assert report["Groups"]["WAT"][2] == "solvent"
+
+    # Residues that are neither protein nor solvent are reported as hetero groups
+    target_file = tmp_path / "target.dat"
+    target_file.write_text(":40@O71\n")
+    result = ft.main(["-nc", NC, "-parm", PARM, "-target", str(target_file), "-solvent", "WAT",
+                      "-out", str(tmp_path / "f.pkl")])
+    charge, n_residues, label = result["charges"]["Groups"]["Na+"]
+    assert (round(charge, 3), n_residues, label) == (2.0, 2, "resid 262,263")
+    assert "Na+" in capsys.readouterr().out

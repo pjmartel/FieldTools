@@ -57,6 +57,14 @@ Output (-out): pickled dictionary
   For point targets, each component is the magnitude of that component's field
   vector, so magnitudes of the components do not add up to the Total.
 
+Frame filters (-filter_distance, -filter_angle):
+  Fields are only calculated for frames that pass all filters, e.g. reactive geometries:
+    -filter_distance :IAA@O1 :SAM@CE 3.2            distance <= 3.2 A
+    -filter_angle :IAA@O1 :SAM@CE :SAM@SD 160       angle O1-CE-SD >= 160 degrees
+  A single value is a maximum distance or a minimum angle; use MIN:MAX for a range
+  (e.g. 2.5:3.2). Both options can be given several times. The kept frames and the
+  measured values are written to <out>_frames.dat.
+
 Trajectories must be imaged unless -pbc True is used. GROMACS trajectories usually
 contain molecules broken over the periodic boundaries: use -pbc True, or process them
 first with gmx trjconv -pbc mol -center.
@@ -120,6 +128,14 @@ def build_parser():
     parser.add_argument("-vector_out", type=optional_path, default=None,
                         help="also write the field vectors (MV/cm) of every target and component "
                              "to this file (.pkl), as arrays of shape (n_frames, 3)")
+    parser.add_argument("-filter_distance", nargs=3, action="append", default=[],
+                        metavar=("ATOM1", "ATOM2", "CUTOFF"),
+                        help="only use frames where the ATOM1-ATOM2 distance is <= CUTOFF (A) "
+                             "or within MIN:MAX; can be repeated")
+    parser.add_argument("-filter_angle", nargs=4, action="append", default=[],
+                        metavar=("ATOM1", "ATOM2", "ATOM3", "CUTOFF"),
+                        help="only use frames where the ATOM1-ATOM2-ATOM3 angle (vertex ATOM2) is "
+                             ">= CUTOFF (degrees) or within MIN:MAX; can be repeated")
     parser.add_argument("-backend", choices=["auto", "mdanalysis", "pytraj"], default="auto",
                         help="library used to read the trajectory [default: auto]")
     parser.add_argument("-verbose", type=str2bool, default=False,
@@ -158,11 +174,12 @@ def read_lines(path):
 class System:
     """Topology arrays plus a generator over (positions, box) of each frame."""
 
-    def __init__(self, names, resnames, resids, charges, n_frames, frames):
+    def __init__(self, names, resnames, resids, charges, n_frames, frames, segids=None):
         self.names = np.asarray(names, dtype=str)
         self.resnames = np.asarray(resnames, dtype=str)
         self.resids = np.asarray(resids, dtype=str)
         self.charges = np.asarray(charges, dtype=np.float64)
+        self.segids = None if segids is None else np.asarray(segids, dtype=str)
         self.n_atoms = len(self.names)
         self.n_frames = n_frames
         self._frames = frames
@@ -236,7 +253,7 @@ def load_mdanalysis(parm, nc, gmx_include=None):
             yield ts.positions.astype(np.float64), box
 
     return System(atoms.names, atoms.resnames, atoms.resids.astype(str), atoms.charges,
-                  len(u.trajectory), frames)
+                  len(u.trajectory), frames, atoms.segids)
 
 
 def load_pytraj(parm, nc):
@@ -350,6 +367,106 @@ def tip4p_oxygens(system):
     mask = np.zeros(system.n_atoms, dtype=bool)
     mask[oxygens] = True
     return mask
+
+
+#####################################################################################
+### Charges
+#####################################################################################
+
+PROTEIN_CAPS = ["ACE", "NME", "NHE", "NH2"]
+
+
+def is_amino_acid(system, first_atoms):
+    """Per atom: True if its residue has backbone atoms N, CA and C, or is a terminal cap."""
+    backbone = np.ones(system.n_atoms, dtype=bool)
+    for name in ("N", "CA", "C"):
+        has_atom = np.zeros(system.n_atoms, dtype=bool)
+        has_atom[first_atoms[system.names == name]] = True   # flag on the residue's first atom
+        backbone &= has_atom[first_atoms]
+    return backbone | np.isin(system.resnames, PROTEIN_CAPS)
+
+
+def charge_report(system, solvent, first_atoms):
+    """Total charges of the system, its segments, the protein, hetero residues and solvent."""
+    q = system.charges
+    report = {"Total": float(q.sum()), "Segments": {}, "Groups": {}}
+    if system.segids is not None and len(np.unique(system.segids)) > 1:
+        for segid in dict.fromkeys(system.segids):
+            report["Segments"][str(segid)] = float(q[system.segids == segid].sum())
+
+    is_solvent = np.isin(system.resnames, solvent)
+    is_protein = is_amino_acid(system, first_atoms) & ~is_solvent
+    residue_starts = np.unique(first_atoms)
+    if is_protein.any():
+        report["Groups"]["Protein"] = (float(q[is_protein].sum()), int(is_protein[residue_starts].sum()), "")
+    hetero = ~(is_protein | is_solvent)
+    for resname in dict.fromkeys(system.resnames[hetero]):
+        atoms = hetero & (system.resnames == resname)
+        resids = system.resids[residue_starts[atoms[residue_starts]]]
+        label = ("resid " + ",".join(resids)) if len(resids) <= 5 else f"resid {resids[0]}-{resids[-1]}"
+        report["Groups"][str(resname)] = (float(q[atoms].sum()), len(resids), label)
+    for resname in solvent:
+        atoms = system.resnames == resname
+        if atoms.any():
+            report["Groups"][resname] = (float(q[atoms].sum()), int(atoms[residue_starts].sum()), "solvent")
+    return report
+
+
+def print_charge_report(report):
+    print("\nCharges (e):")
+    print(f"  {'System':<28} {report['Total']:+9.3f}")
+    if abs(report["Total"] - round(report["Total"])) > 0.01:
+        print("  Warning! The total charge of the system is not an integer.")
+    for segid, charge in report["Segments"].items():
+        print(f"  segment {segid:<20} {charge:+9.3f}")
+    for name, (charge, n_residues, label) in report["Groups"].items():
+        residues = f"{n_residues} residue{'s' if n_residues != 1 else ''}"
+        print(f"  {name:<28} {charge:+9.3f}   {residues}{'  ' + label if label else ''}")
+    print()
+
+
+#####################################################################################
+### Frame filters
+#####################################################################################
+
+def parse_range(text, kind):
+    """'3.2' is a maximum distance or a minimum angle; 'MIN:MAX' is a range."""
+    try:
+        if ":" in text:
+            low, high = (float(v) for v in text.split(":"))
+        elif kind == "distance":
+            low, high = 0.0, float(text)
+        else:
+            low, high = float(text), 180.0
+    except ValueError:
+        sys.exit(f"Error! Invalid {kind} cutoff '{text}'. Use a number or MIN:MAX, e.g. 3.2 or 2.5:3.2")
+    if low > high:
+        sys.exit(f"Error! Invalid {kind} range '{text}': MIN is larger than MAX.")
+    return low, high
+
+
+def load_filters(args, system):
+    filters = []
+    for kind, specs in [("distance", f) for f in args.filter_distance] + [("angle", f) for f in args.filter_angle]:
+        *atoms, cutoff = specs
+        low, high = parse_range(cutoff, kind)
+        filters.append({"kind": kind, "label": "-".join(atoms), "low": low, "high": high,
+                        "atoms": [select_one_atom(spec, system) for spec in atoms]})
+    return filters
+
+
+def measure(geometry_filter, positions, box):
+    """Distance (A) or angle (degrees) of a filter in one frame."""
+    def bond(i, j):
+        vector = positions[j] - positions[i]
+        return vector if box is None else minimum_image(vector[None, :], box)[0]
+
+    atoms = geometry_filter["atoms"]
+    if geometry_filter["kind"] == "distance":
+        return float(np.linalg.norm(bond(atoms[0], atoms[1])))
+    a, b = bond(atoms[1], atoms[0]), bond(atoms[1], atoms[2])
+    cosine = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
 #####################################################################################
@@ -509,8 +626,12 @@ def calculate_fields(args):
     if args.solvent is None:
         args.solvent = detect_solvent(system)
         print("-solvent        Detected solvent     : ", ",".join(args.solvent) or "none")
+    first_atoms = residue_first_atoms(system)
+    charges_summary = charge_report(system, args.solvent, first_atoms)
+    print_charge_report(charges_summary)
     targets = load_targets(args.target, system)
     load_exclusions(args.exclude_atoms, targets, system)
+    filters = load_filters(args, system)
     components, atom_component, is_solvent = field_components(system, args.solvent)
     n_components = len(components)
 
@@ -526,10 +647,13 @@ def calculate_fields(args):
             print(f"Target {target['name']} ({target['kind']}): {atoms}; "
                   f"{int(target['excluded'].sum())} atoms excluded")
 
-    first_atoms = residue_first_atoms(system)
-    fields = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
-    vectors = {t["name"]: np.zeros((system.n_frames, n_components, 3)) for t in targets}
-    energies = {t["name"]: np.zeros((system.n_frames, n_components)) for t in targets}
+        for f in filters:
+            print(f"Filter {f['kind']} {f['label']}: {f['low']:g} to {f['high']:g}, atoms {f['atoms']}")
+
+    fields = {t["name"]: [] for t in targets}
+    vectors = {t["name"]: [] for t in targets}
+    energies = {t["name"]: [] for t in targets}
+    kept_frames, filter_values = [], []
 
     for frame_i, (positions, box) in enumerate(system.frames()):
         if args.pbc:
@@ -539,6 +663,13 @@ def calculate_fields(args):
             positions = make_whole(positions, first_atoms, box)
         else:
             box = None
+
+        values = [measure(f, positions, box) for f in filters]
+        if not all(f["low"] <= v <= f["high"] for f, v in zip(filters, values)):
+            continue
+        kept_frames.append(frame_i + 1)
+        filter_values.append(values)
+
         charges = system.charges
         if args.use_qm_charges:
             charges = qm_frame_charges(charges, qm_frames, qm_index, frame_i)
@@ -560,11 +691,8 @@ def calculate_fields(args):
 
             r_vectors = displacements(point, positions, box, first_atoms)[included]
             field = decompose(field_vectors(r_vectors, q), comp, solv, n_components)
-            vectors[name][frame_i] = field
-            if target["kind"] == "point":
-                fields[name][frame_i] = np.linalg.norm(field, axis=1)
-            else:
-                fields[name][frame_i] = field @ unit
+            vectors[name].append(field)
+            fields[name].append(np.linalg.norm(field, axis=1) if target["kind"] == "point" else field @ unit)
 
             if args.energy_out:
                 energy = np.zeros(len(q))
@@ -573,17 +701,39 @@ def calculate_fields(args):
                     other = np.flatnonzero(included) != atom
                     r_atom = displacements(positions[atom], positions, box, first_atoms)[included]
                     energy[other] += coulomb_energies(r_atom[other], charges[atom], q[other])
-                energies[name][frame_i] = decompose(energy[:, None], comp, solv, n_components)[:, 0]
+                energies[name].append(decompose(energy[:, None], comp, solv, n_components)[:, 0])
+            else:
+                energies[name].append(np.zeros(n_components))
 
             if args.verbose:
-                print(f"Frame {frame_i + 1} {name}: Total {fields[name][frame_i][0]:.2f} MV/cm")
+                print(f"Frame {frame_i + 1} {name}: Total {fields[name][-1][0]:.2f} MV/cm")
 
+    if filters:
+        print(f"Frames passing the filters: {len(kept_frames)} of {system.n_frames}")
+        if not kept_frames:
+            print("Warning! No frame passes the filters; the output contains no data.")
+
+    def stack(data, shape):
+        return {name: np.array(data[name]).reshape((-1,) + shape) for name in data}
+
+    fields, energies = stack(fields, (n_components,)), stack(energies, (n_components,))
+    vectors = stack(vectors, (n_components, 3))
     as_dict = lambda data: {name: {c: data[name][:, i].tolist() for i, c in enumerate(components)}
                             for name in data}
     result = {"fields": as_dict(fields), "energies": as_dict(energies),
               "vectors": {name: {c: vectors[name][:, i] for i, c in enumerate(components)}
-                          for name in vectors}}
+                          for name in vectors},
+              "frames": kept_frames, "filters": filters, "filter_values": filter_values,
+              "charges": charges_summary}
     return result
+
+
+def write_frames(path, result):
+    """Kept frame numbers and the measured filter values."""
+    with open(path, "w") as f:
+        f.write("# frame " + " ".join(f"{g['kind']}:{g['label']}" for g in result["filters"]) + "\n")
+        for frame, values in zip(result["frames"], result["filter_values"]):
+            f.write(f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in values) + "\n")
 
 
 def main(argv=None):
@@ -596,6 +746,10 @@ def main(argv=None):
     print("-solvent        Non-protein residues : ", ",".join(args.solvent) if args.solvent else "auto")
     print("-exclude_atoms  Atoms excluded       : ",
           args.exclude_atoms or "Full residue of the first atom of each target")
+    for f in args.filter_distance:
+        print("-filter_distance: ", " ".join(f))
+    for f in args.filter_angle:
+        print("-filter_angle   : ", " ".join(f))
     for flag in ("gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
         if getattr(args, flag):
             print(f"-{flag:<15}: ", getattr(args, flag))
@@ -611,6 +765,10 @@ def main(argv=None):
     if args.vector_out:
         with open(args.vector_out, "wb") as f:
             pickle.dump(result["vectors"], f)
+    if result["filters"]:
+        frames_file = os.path.splitext(args.out)[0] + "_frames.dat"
+        write_frames(frames_file, result)
+        print("Kept frames written to : ", frames_file)
     print("\nField calculation DONE : ", datetime.datetime.now())
     return result
 

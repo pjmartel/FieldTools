@@ -40,6 +40,8 @@ Install with `pip install -r requirements.txt`.
                                [-vector_out <vector file>]
                                [-backend <auto|mdanalysis|pytraj>]
                                [-gmx_include <GROMACS force field directory>]
+                               [-filter_distance <atom1> <atom2> <cutoff>]
+                               [-filter_angle <atom1> <atom2> <atom3> <cutoff>]
                                [-verbose <True|False>]
 
 Run `python utils/FieldTools.py -h` for a description of all options.
@@ -48,6 +50,20 @@ Run `python utils/FieldTools.py -h` for a description of all options.
 **Solvent.** With `-solvent auto` (default), common water and ion residue names found in the system
 (e.g. `WAT`, `HOH`, `SOL`, `Na+`, `Cl-`, `NA`, `CL`, `K`) are treated as solvent.
 Give an explicit comma-separated list to include other molecules, such as ligands or lipids.
+
+**Frame filters.** Restrict the calculation to frames with a given geometry, e.g. reactive conformations:
+
+    -filter_distance :IAA@O1 :SAM@CE 3.2            # O1-CE distance <= 3.2 A
+    -filter_angle :IAA@O1 :SAM@CE :SAM@SD 160       # O1-CE-SD angle >= 160 degrees (vertex: middle atom)
+
+A single value is a maximum distance or a minimum angle; `MIN:MAX` gives a range (`2.5:3.2`).
+Both options can be repeated, and a frame must pass all filters. With `-pbc True`, distances and angles use the
+nearest periodic images. The output then only contains the kept frames, and `<out>_frames.dat` lists their
+frame numbers with the measured distances and angles.
+
+**Charges.** At the start of every run, FieldTools prints the total charge of the system (with a warning if it is
+not an integer), of each segment (chains and molecules in GROMACS topologies), of the protein, of each hetero
+molecule (residues that are neither amino acids nor solvent, e.g. ligands and cofactors) and of each solvent species.
 
 ### GROMACS
     python utils/FieldTools.py -top topol.tpr -traj traj.xtc -target target.dat -pbc True -out field.pkl
