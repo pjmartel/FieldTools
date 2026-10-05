@@ -13,6 +13,7 @@ import datetime
 import os
 import pickle
 import re
+import shlex
 import shutil
 import sys
 import warnings
@@ -142,7 +143,11 @@ def build_parser():
     parser.add_argument("-parm", "-top", dest="parm",
                         help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top) [required]")
     parser.add_argument("-target", help="target file (see below) [required]")
-    parser.add_argument("-out", help="output file for the fields (.pkl) [required]")
+    parser.add_argument("-out", help="output file for the fields (.pkl) [required, unless --prefix is given]")
+    parser.add_argument("--prefix", dest="prefix", metavar="PREFIX",
+                        help="add PREFIX_ to the names of all output files (overrides the names in the "
+                             "parameter file) and write the screen output to PREFIX.log; without -out, "
+                             "the fields are written to PREFIX_field.pkl")
     parser.add_argument("-solvent", default="auto",
                         help="comma separated list of non-protein residue names, or auto to use the "
                              "common water and ion residue names found in the system [default: auto]")
@@ -207,6 +212,11 @@ def parse_arguments(argv):
     args.solvent = None if args.solvent == "auto" else [i for i in args.solvent.split(",") if i]
     if args.write_parameter_file:
         return args
+    if args.prefix:
+        args.out = args.out or "field.pkl"
+        for dest in ("out", "energy_out", "vector_out"):
+            if getattr(args, dest):
+                setattr(args, dest, add_prefix(getattr(args, dest), args.prefix))
     missing = [flag for dest, flag in (("parm", "-top"), ("nc", "-traj"), ("target", "-target"), ("out", "-out"))
                if not getattr(args, dest)]
     if missing:
@@ -214,6 +224,12 @@ def parse_arguments(argv):
     if args.use_qm_charges and (args.qm_charges is None or args.qm_dict is None):
         parser.error("-use_qm_charges True requires -qm_charges and -qm_dict")
     return args
+
+
+def add_prefix(path, prefix):
+    """results/field.pkl -> results/<prefix>_field.pkl"""
+    folder, name = os.path.split(path)
+    return os.path.join(folder, f"{prefix}_{name}")
 
 
 def read_lines(path):
@@ -900,13 +916,53 @@ def write_frames(path, result):
             f.write(f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in values) + "\n")
 
 
+class Tee:
+    """Write to several streams at once (the screen and the log file)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
 def main(argv=None):
-    args = parse_arguments(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    args = parse_arguments(argv)
     if args.write_parameter_file:
         write_parameter_file(args.write_parameter_file, args)
         print("Parameter file written to : ", args.write_parameter_file)
         return None
+    if not args.prefix:
+        return run(args, argv)
 
+    # With a prefix, everything printed (including errors) is also written to <prefix>.log
+    log_file = os.path.join(os.path.dirname(args.out), args.prefix + ".log")
+    stdout, stderr = sys.stdout, sys.stderr
+    with open(log_file, "w") as log:
+        sys.stdout, sys.stderr = Tee(stdout, log), Tee(stderr, log)
+        try:
+            return run(args, argv, log_file)
+        except SystemExit as error:
+            if error.code not in (None, 0) and not isinstance(error.code, int):
+                log.write(f"{error.code}\n")
+            raise
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+
+
+def run(args, argv, log_file=None):
+    print(f"FieldTools {__version__}  {datetime.datetime.now():%Y-%m-%d %H:%M:%S}  "
+          f"in {os.getcwd()}")
+    print("Command: fieldtools " + shlex.join(argv))
+    if log_file:
+        print("Log file: ", log_file)
+    print()
     show = lambda value: " | ".join(value) if isinstance(value, list) else value
     if args.parameter_file:
         print("--parameter-file                     : ", args.parameter_file)
@@ -914,6 +970,8 @@ def main(argv=None):
     print("-parm           Parameter file       : ", args.parm)
     print("-target         Field target         : ", show(args.target))
     print("-out            Output file          : ", args.out)
+    if args.prefix:
+        print("--prefix        Output prefix        : ", args.prefix)
     print("-solvent        Non-protein residues : ", ",".join(args.solvent) if args.solvent else "auto")
     print("-exclude_atoms  Atoms excluded       : ",
           show(args.exclude_atoms) or "Full residue of the first atom of each target")

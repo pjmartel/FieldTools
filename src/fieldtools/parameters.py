@@ -42,6 +42,7 @@ SCHEMA = {
         "out": ("out", PATH, "fields (.pkl)"),
         "energy_out": ("energy_out", PATH, "Coulomb energies (.pkl)"),
         "vector_out": ("vector_out", PATH, "field vectors (.pkl)"),
+        "prefix": ("prefix", TEXT, "added with _ to the names of all output files (out defaults to field.pkl); also writes <prefix>.log"),
     },
     "qm": {
         "use_qm_charges": ("use_qm_charges", BOOL, "replace charges with per-frame QM charges"),
@@ -180,5 +181,5 @@ def example(name, kind):
                 "target_file": '"target.dat"', "exclude_file": '"exclude.dat"',
                 "distance": '["IAA/O1 SAM/CE 3.2"]', "angle": '["IAA/O1 SAM/CE SAM/SD 160"]',
                 "out": '"field.pkl"', "energy_out": '"energy.pkl"', "vector_out": '"vectors.pkl"',
-                "qm_charges": '"qm_charges.dat"', "qm_dict": '"qm.dict"'}
+                "prefix": '"run1"', "qm_charges": '"qm_charges.dat"', "qm_dict": '"qm.dict"'}
     return examples.get(name, "true" if kind == BOOL else '""')

@@ -56,7 +56,7 @@ repository take effect without reinstalling; leave it out to install a fixed cop
     fieldtools -nc <trajectory file>               (or -traj)
                -parm <parameter file>              (or -top)
                -target <target file>
-               -out <output file>
+               -out <output file>                  (or --prefix)
                [-solvent <non-protein residues>]   default: auto
                [-exclude_atoms <exclusion file>]
                [-TIP4P <True|False>]
@@ -68,6 +68,7 @@ repository take effect without reinstalling; leave it out to install a fixed cop
                [-filter_distance <atom1> <atom2> <cutoff>]
                [-filter_angle <atom1> <atom2> <atom3> <cutoff>]
                [-verbose <True|False>]
+               [--prefix <prefix>]
     fieldtools --parameter-file <parameter file> [options]
 
 Run `fieldtools -h` for a description of all options, and `fieldtools --version` for the version.
@@ -140,9 +141,15 @@ vector_out = "vectors.pkl"
 
     fieldtools --parameter-file run.toml
     fieldtools --parameter-file run.toml -traj md2.xtc -out field2.pkl     # override some options
+    fieldtools --parameter-file run.toml -traj rep2.xtc --prefix rep2      # rep2_field.pkl, rep2_vectors.pkl, ...
 
 - Options on the command line override the parameter file; a filter on the command line replaces the file's
   filters of that kind.
+- `--prefix NAME` (or `prefix` in `[output]`) adds `NAME_` to the names of all output files, keeping their folders
+  (`results/field.pkl` becomes `results/NAME_field.pkl`); without `out`, the fields go to `NAME_field.pkl`.
+  The command-line prefix overrides the one in the file. Everything printed on the screen, including errors, is also
+  written to `NAME.log` in the folder of the field file. Every run starts by printing the FieldTools version and the
+  exact command, so the log records how its results were produced.
 - Relative paths are relative to the folder of the parameter file, so it can be run from anywhere.
 - Targets and exclusions can be listed in the file (`targets`, `exclude`) or given as files (`target_file`, `exclude_file`).
 - Unknown sections or keys are reported as errors, so typos are not silently ignored.
@@ -168,15 +175,17 @@ Section and key names are case-insensitive. Options that are left out take their
 | | `pbc` | true/false | `false` | `-pbc` | make residues whole and use the periodic image closest to the target |
 | `[filters]` | `distance` | list | none | `-filter_distance` | `"ATOM1 ATOM2 CUTOFF"` entries: distance <= CUTOFF (Å), or `MIN:MAX` |
 | | `angle` | list | none | `-filter_angle` | `"ATOM1 ATOM2 ATOM3 CUTOFF"` entries: angle >= CUTOFF (degrees, vertex = middle atom), or `MIN:MAX` |
-| `[output]` | `out` | path | **required** | `-out` | fields (`.pkl`) |
+| `[output]` | `out` | path | **required**² | `-out` | fields (`.pkl`) |
 | | `energy_out` | path | not written | `-energy_out` | Coulomb interaction energies (`.pkl`) |
 | | `vector_out` | path | not written | `-vector_out` | field vectors (`.pkl`) |
+| | `prefix` | text | none | `--prefix` | added with `_` to the names of all output files (`out` then defaults to `field.pkl`); the screen output is also written to `<prefix>.log` |
 | `[qm]` | `use_qm_charges` | true/false | `false` | `-use_qm_charges` | replace charges with per-frame QM charges (experimental) |
 | | `qm_charges` | path | | `-qm_charges` | QM charges file from `qmchargestools` |
 | | `qm_dict` | path | | `-qm_dict` | QM dict file from `qmchargestools` |
 | `[run]` | `verbose` | true/false | `false` | `-verbose` | display additional information |
 
 ¹ Use either `targets` or `target_file`, and either `exclude` or `exclude_file`; giving both of a pair is an error.
+² Not required with a prefix: the fields are then written to `<prefix>_field.pkl`.
 
 - Paths and text are written in quotes; true/false without quotes. Lists can span several lines, one entry per line.
 - A frame must pass all filters. With filters, the kept frames are also written to `<out>_frames.dat`.

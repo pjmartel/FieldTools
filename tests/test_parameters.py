@@ -120,3 +120,53 @@ def test_missing_required_options(tmp_path, capsys):
     with pytest.raises(SystemExit):
         ft.main(["--parameter-file", str(path)])
     assert "missing -traj, -target, -out" in capsys.readouterr().err
+
+
+def test_prefix_on_command_line_renames_all_outputs(tmp_path, parameter_file):
+    text = PARAMETERS.replace('out = "field.pkl"', 'out = "results/field.pkl"\nvector_out = "results/vectors.pkl"')
+    (tmp_path / "results").mkdir()
+    parameter_file.write_text(text)
+    ft.main(["--parameter-file", str(parameter_file), "--prefix", "rep2"])
+    written = sorted(os.listdir(tmp_path / "results"))
+    assert written == ["rep2.log", "rep2_field.pkl", "rep2_field_frames.dat", "rep2_vectors.pkl"]
+
+
+def test_prefix_without_out_uses_default_name(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "target.dat").write_text("40/O71\n")
+    ft.main(["-top", PARM, "-traj", NC, "-target", "target.dat", "--prefix", "quick"])
+    assert os.path.exists(tmp_path / "quick_field.pkl")
+
+
+def test_prefix_in_parameter_file_and_override(tmp_path, parameter_file):
+    parameter_file.write_text(PARAMETERS.replace('out = "field.pkl"', 'out = "field.pkl"\nprefix = "file"'))
+    ft.main(["--parameter-file", str(parameter_file)])
+    assert os.path.exists(tmp_path / "file_field.pkl")
+    ft.main(["--parameter-file", str(parameter_file), "--prefix", "cli"])
+    assert os.path.exists(tmp_path / "cli_field.pkl") and not os.path.exists(tmp_path / "cli_file_field.pkl")
+
+
+def test_written_parameter_file_applies_prefix_once(tmp_path, parameter_file):
+    written = tmp_path / "written.toml"
+    ft.main(["--parameter-file", str(parameter_file), "--prefix", "once", "--write-parameter-file", str(written)])
+    text = written.read_text()
+    assert 'prefix = "once"' in text and 'out = "field.pkl"' in text
+    ft.main(["--parameter-file", str(written)])
+    assert os.path.exists(tmp_path / "once_field.pkl") and not os.path.exists(tmp_path / "once_once_field.pkl")
+
+
+def test_prefix_writes_log_file(tmp_path, parameter_file, capsys):
+    ft.main(["--parameter-file", str(parameter_file), "--prefix", "rep3"])
+    screen = capsys.readouterr().out
+    log = (tmp_path / "rep3.log").read_text()      # next to the output files
+    assert log == screen
+    assert "Command: fieldtools --parameter-file" in log and "--prefix rep3" in log
+    assert "Frames passing the filters" in log and "Field calculation DONE" in log
+
+
+def test_log_file_records_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "target.dat").write_text("XX/CA\n")
+    with pytest.raises(SystemExit):
+        ft.main(["-top", PARM, "-traj", NC, "-target", "target.dat", "--prefix", "bad"])
+    assert "Error! No atom in the system matches 'XX/CA'." in (tmp_path / "bad.log").read_text()
