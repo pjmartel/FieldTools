@@ -149,6 +149,38 @@ vector_out = "vectors.pkl"
 - `fieldtools --write-parameter-file run.toml` writes a commented template with all options; added to a complete
   command line, it writes that command's options to the file instead of running it.
 
+#### Sections and keys
+Section and key names are case-insensitive. Options that are left out take their default
+(or the value given on the command line).
+
+| Section | Key | Type | Default | Command line | Meaning |
+|---|---|---|---|---|---|
+| `[input]` | `top` | path | **required** | `-top`, `-parm` | topology with charges (`.parm7`, `.tpr`, `.top`); aliases `topology`, `parm` |
+| | `traj` | path | **required** | `-traj`, `-nc` | trajectory (`.nc`, `.xtc`, `.trr`, ...); aliases `trajectory`, `nc` |
+| | `backend` | text | `"auto"` | `-backend` | `"auto"`, `"mdanalysis"` or `"pytraj"` |
+| | `gmx_include` | path | found automatically | `-gmx_include` | folder with the GROMACS force fields `#include`d by a `.top` |
+| `[targets]` | `targets` | list | **required**¹ | | one target per entry: one atom (point) or two atoms (bond), e.g. `["IAA/O1 SAM/SD", "40/O71"]` |
+| | `exclude` | list | residue of the first target atom | | excluded atoms: one entry per target, or one entry for all targets, e.g. `["IAA SAM"]` |
+| | `target_file` | path | | `-target` | a target file instead of `targets`¹ |
+| | `exclude_file` | path | | `-exclude_atoms` | an exclusion file instead of `exclude`¹ |
+| `[system]` | `solvent` | text or list | `"auto"` | `-solvent` | solvent residue names (`"SOL,NA,CL"` or `["SOL", "NA", "CL"]`), or `"auto"` |
+| | `tip4p` | true/false | `false` | `-TIP4P` | 4-point water model |
+| | `pbc` | true/false | `false` | `-pbc` | make residues whole and use the periodic image closest to the target |
+| `[filters]` | `distance` | list | none | `-filter_distance` | `"ATOM1 ATOM2 CUTOFF"` entries: distance <= CUTOFF (Å), or `MIN:MAX` |
+| | `angle` | list | none | `-filter_angle` | `"ATOM1 ATOM2 ATOM3 CUTOFF"` entries: angle >= CUTOFF (degrees, vertex = middle atom), or `MIN:MAX` |
+| `[output]` | `out` | path | **required** | `-out` | fields (`.pkl`) |
+| | `energy_out` | path | not written | `-energy_out` | Coulomb interaction energies (`.pkl`) |
+| | `vector_out` | path | not written | `-vector_out` | field vectors (`.pkl`) |
+| `[qm]` | `use_qm_charges` | true/false | `false` | `-use_qm_charges` | replace charges with per-frame QM charges (experimental) |
+| | `qm_charges` | path | | `-qm_charges` | QM charges file from `qmchargestools` |
+| | `qm_dict` | path | | `-qm_dict` | QM dict file from `qmchargestools` |
+| `[run]` | `verbose` | true/false | `false` | `-verbose` | display additional information |
+
+¹ Use either `targets` or `target_file`, and either `exclude` or `exclude_file`; giving both of a pair is an error.
+
+- Paths and text are written in quotes; true/false without quotes. Lists can span several lines, one entry per line.
+- A frame must pass all filters. With filters, the kept frames are also written to `<out>_frames.dat`.
+
 ### Atom specifiers
 Two equivalent syntaxes can be mixed freely in target and exclusion files:
 
