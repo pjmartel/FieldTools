@@ -172,3 +172,27 @@ def test_pbc_repairs_broken_molecules(tmp_path):
     reference = run(tmp_path, parm, str(intact), extra=["-pbc", "True"])
     result = run(tmp_path, parm, str(broken), extra=["-pbc", "True"])
     assert_same_fields(result["fields"], reference["fields"], atol=1e-3)
+
+
+def test_chains_in_tpr():
+    datafiles = pytest.importorskip("MDAnalysisTests.datafiles")
+    system = ft.load_system(datafiles.TPR2024, datafiles.TPR2024)   # lysozyme: seg_0_Protein_A, seg_1_SOL
+    first = ft.select_one_atom("A/1/N", system)
+    assert first == ft.select_one_atom(":1@N", system)
+    assert ft.select_one_atom("Protein_A/1/N", system) == first
+    assert ft.select_one_atom("seg_0_Protein_A/1/N", system) == first
+    assert set(ft.select_atoms("SOL/SOL/", system)) == set(ft.select_atoms(":SOL", system))
+    with pytest.raises(SystemExit) as error:
+        ft.select_atoms("B/1/N", system)
+    assert "Available: Protein_A, SOL" in str(error.value)
+    with pytest.raises(SystemExit) as error:
+        ft.select_atoms("SOL/1/N", system)        # residue 1 is in chain A, not in SOL
+    assert "No atom" in str(error.value)
+
+
+def test_tpr_coordinates_are_in_angstrom():
+    # MDAnalysis <= 2.10 returns the coordinates stored in a .tpr in nm
+    datafiles = pytest.importorskip("MDAnalysisTests.datafiles")
+    system = ft.load_system(datafiles.TPR2024, datafiles.TPR2024)   # lysozyme, about 40 A across
+    positions, _ = next(system.frames())
+    assert 30 < np.ptp(positions, axis=0).max() < 60

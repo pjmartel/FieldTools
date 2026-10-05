@@ -285,3 +285,31 @@ def test_filter_statistics_cover_all_frames(tmp_path, universe, capsys):
     output = capsys.readouterr().out
     assert f"Filter values over all {len(distances)} frames" in output
     assert "passed by 0 frames" in output
+
+
+def test_pymol_style_specifiers_match_amber_style(tmp_path, kpc):
+    exclude = " ".join(f"40/{n}" for n in "HB2 HB1 CB OG C7 O71 C25 H6 CA HA".split()) + " 264/"
+    result = run(tmp_path, ["40/C7 ACA/O71", "/40/O71"], [exclude])
+    assert list(result["fields"]) == ["40/C7_ACA/O71", "/40/O71"]
+    np.testing.assert_allclose(result["fields"]["40/C7_ACA/O71"]["Total"], kpc["fields"][BOND]["Total"])
+    np.testing.assert_allclose(result["fields"]["/40/O71"]["Total"], kpc["fields"][POINT]["Total"])
+
+
+def test_whole_residue_and_atom_lists(universe):
+    system = ft.load_system(PARM, NC)
+    residue_264 = list(universe.select_atoms("resid 264").indices)   # a 3-point water: O, H1, H2
+    for spec in (":264", "264", "264/", "264/O,H1,H2", ":264@O,H1,H2"):
+        assert list(ft.select_atoms(spec, system)) == residue_264, spec
+    assert list(ft.select_atoms("264/O,H1", system)) == residue_264[:2]
+
+
+@pytest.mark.parametrize("spec, message", [
+    ("A/40/CA", "no chain information"),
+    ("40@CA", "Invalid atom specifier"),
+    ("A/B/40/CA", "Invalid atom specifier"),
+])
+def test_invalid_pymol_specifiers(spec, message):
+    system = ft.load_system(PARM, NC)
+    with pytest.raises(SystemExit) as error:
+        ft.select_atoms(spec, system)
+    assert message in str(error.value)

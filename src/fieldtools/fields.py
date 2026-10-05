@@ -12,6 +12,7 @@ import argparse
 import datetime
 import os
 import pickle
+import re
 import shutil
 import sys
 import warnings
@@ -36,9 +37,16 @@ ION_NAMES = ["Na+", "Cl-", "K+", "Li+", "Rb+", "Cs+", "Mg2+", "Ca2+", "Zn2+", "B
 EXTRA_POINT_NAMES = ["EPW", "EP", "MW"]
 
 TARGET_HELP = """
+Atom specifiers: two equivalent syntaxes
+  Amber:  :<residue>@<atom>        e.g. :47@OG   :LIG@C1   :47@CA,CB   :264
+  PyMOL:  [<chain>/]<residue>/<atom>   e.g. 47/OG   LIG/C1   47/CA,CB   264/   A/47/OG
+  <residue> is a residue number (as numbered in the topology) or a unique residue
+  name; <atom> is one atom name or a comma-separated list; leaving out the atom
+  selects the whole residue. <chain> is the GROMACS molecule name of a .tpr/.top,
+  or its last part (A matches seg_0_Protein_chain_A); Amber topologies have no chains.
+
 Target file (-target):
-  One target per line, written as one or two atom specifiers :<residue>@<atom>,
-  where <residue> is a residue number (e.g. 40) or a unique residue name (e.g. LIG).
+  One target per line, written as one or two atom specifiers.
     :47@OG          field at atom OG of residue 47; the output is the magnitude
                     of the field vector |E| (the vectors are written with -vector_out)
     :47@OG :47@HG   field at the bond midpoint, projected onto the unit vector
@@ -252,10 +260,17 @@ def load_mdanalysis(parm, nc, gmx_include=None):
         sys.exit(f"Error! {parm} contains no partial charges. Use a topology file such as .parm7, .tpr or .top.")
     atoms = u.atoms
 
+    # MDAnalysis releases up to 2.10 return coordinates read from a .tpr file in nm instead of A
+    from MDAnalysis.coordinates.TPR import TPRReader
+    version = tuple(int(v) for v in re.findall(r"\d+", mda.__version__)[:2])
+    scale = 10.0 if isinstance(u.trajectory, TPRReader) and version < (2, 11) else 1.0
+    if scale != 1.0:
+        print(f"Note: converting the coordinates of {nc} from nm to A (not done by MDAnalysis {mda.__version__}).")
+
     def frames():
         for ts in u.trajectory:
             box = None if ts.dimensions is None else np.array(ts.dimensions, dtype=np.float64)
-            yield ts.positions.astype(np.float64), box
+            yield scale * ts.positions.astype(np.float64), box
 
     return System(atoms.names, atoms.resnames, atoms.resids.astype(str), atoms.charges,
                   len(u.trajectory), frames, atoms.segids)
@@ -298,17 +313,55 @@ def load_system(parm, nc, backend="auto", gmx_include=None):
 ### Atom selection
 #####################################################################################
 
+SPECIFIER_HELP = "Use :<residue>@<atom> (e.g. :40@OG) or [<chain>/]<residue>/<atom> (e.g. 40/OG, A/40/OG)"
+
+
+def parse_specifier(spec):
+    """Split an atom specifier into (chain, residue, atom names).
+
+    Amber style:  :<residue>[@<atom>[,<atom>...]]
+    PyMOL style:  [<chain>/]<residue>[/<atom>[,<atom>...]]  (read from the right; a trailing
+                  slash or a missing atom field selects the whole residue)
+    """
+    if spec.startswith(":"):
+        residue, _, atoms = spec[1:].partition("@")
+        chain = None
+    else:
+        fields = spec.lstrip("/").split("/")
+        if len(fields) > 3:
+            sys.exit(f"Error! Invalid atom specifier '{spec}'. {SPECIFIER_HELP}")
+        if len(fields) == 3:
+            chain, residue, atoms = fields
+        else:
+            chain, residue, atoms = None, fields[0], (fields[1] if len(fields) == 2 else "")
+        chain = chain or None
+    if residue == "" or "@" in residue or ":" in residue:
+        sys.exit(f"Error! Invalid atom specifier '{spec}'. {SPECIFIER_HELP}")
+    return chain, residue, [a for a in atoms.split(",") if a]
+
+
+def chain_mask(chain, system):
+    """Atoms of a chain: its GROMACS molecule (segment) name, or the name's last part after '_'."""
+    segids = system.segids
+    if segids is None or set(np.unique(segids)) <= {"SYSTEM", ""}:
+        sys.exit(f"Error! Chain '{chain}' given, but this topology has no chain information "
+                 "(Amber topologies do not store chains). Select residues by number instead.")
+    names = np.array([re.sub(r"^seg_\d+_", "", seg) for seg in segids])
+    mask = (segids == chain) | (names == chain) | np.char.endswith(names, "_" + chain)
+    if not mask.any():
+        available = ", ".join(dict.fromkeys(names))
+        sys.exit(f"Error! No chain or molecule '{chain}' in the topology. Available: {available}")
+    return mask
+
+
 def select_atoms(spec, system):
-    """Indices of the atoms matching :<resid|resname>[@<name>[,<name>...]]."""
-    if not spec.startswith(":"):
-        sys.exit(f"Error! Invalid atom specifier '{spec}'. Expected :<residue>@<atom>, e.g. :40@OG")
-    residue, _, atom_names = spec[1:].partition("@")
-    if residue == "":
-        sys.exit(f"Error! Invalid atom specifier '{spec}'. Expected :<residue>@<atom>, e.g. :40@OG")
-    by_number = residue.isdigit()
-    selection = (system.resids == residue) if by_number else (system.resnames == residue)
+    """Indices of the atoms matching an atom specifier (see parse_specifier)."""
+    chain, residue, atom_names = parse_specifier(spec)
+    selection = (system.resids == residue) if residue.isdigit() else (system.resnames == residue)
+    if chain is not None:
+        selection &= chain_mask(chain, system)
     if atom_names:
-        selection &= np.isin(system.names, atom_names.split(","))
+        selection &= np.isin(system.names, atom_names)
     indices = np.flatnonzero(selection)
     if len(indices) == 0:
         sys.exit(f"Error! No atom in the system matches '{spec}'.")

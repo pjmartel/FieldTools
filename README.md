@@ -12,7 +12,8 @@ To test FieldTools, click on: <a target="_blank" href="https://colab.research.go
 
 > [!NOTE]
 > Fields are defined in the **target** file and are either calculated at an atom or along a bond.
-> Atoms are written as `:<residue>@<atom>`, where `<residue>` is a residue number (`:40@OG`) or a unique residue name (`:LIG@C1`).
+> Atoms are written Amber-style as `:<residue>@<atom>` (`:40@OG`, `:LIG@C1`) or PyMOL-style as `[<chain>/]<residue>/<atom>` (`40/OG`, `LIG/C1`, `A/40/OG`),
+> where `<residue>` is a residue number or a unique residue name (see [Atom specifiers](#atom-specifiers)).
 > Use one atom for the field at that atom, or two atoms for the field along the bond between them.
 > Several targets can be calculated in parallel, by adding additional lines to the **target** file.
 
@@ -109,6 +110,25 @@ molecule (residues that are neither amino acids nor solvent, e.g. ligands and co
 - `.xtc` files store coordinates with a precision of 0.01 Å, which changes fields from nearby atoms by up to about 1%.
   Use `.trr` files (or a higher `compressed-x-precision`) when this matters.
 - `data/KPC.top` and `data/KPC.xtc` are the Amber example system converted to GROMACS format.
+
+### Atom specifiers
+Two equivalent syntaxes can be mixed freely in target and exclusion files:
+
+| Amber style | PyMOL style | Selects |
+|---|---|---|
+| `:40@OG` | `40/OG` | atom OG of residue 40 |
+| `:SAM@SD` | `SAM/SD` | atom SD of the (only) residue named SAM |
+| `:40@CA,CB` | `40/CA,CB` | several atoms of residue 40 |
+| `:264` | `264/` or `264` | all atoms of residue 264 |
+| | `A/40/OG` | atom OG of residue 40 in chain A |
+
+- Residue numbers are those of the topology: residues are numbered sequentially from 1 over the whole system
+  (chains, ligands, ions and water), which can differ from the numbering of the original PDB file.
+  `-verbose True` prints the residue and atom names of every target.
+- A residue name must match exactly one residue in a target; in an exclusion line it selects all residues with that name.
+- Chains are only available for GROMACS topologies, where `<chain>` is a molecule name as read by MDAnalysis
+  (e.g. `seg_0_Protein_chain_A`), the name without the `seg_0_` prefix (`Protein_chain_A`), or its last part (`A`).
+  Amber topologies do not store chains.
 
 **Exclusions.** Without `-exclude_atoms`, all atoms of the residue of the first target atom are excluded from the field.
 Otherwise, the exclusion file contains one line per target (or a single line used for all targets) listing atoms
