@@ -68,6 +68,7 @@ repository take effect without reinstalling; leave it out to install a fixed cop
                [-filter_distance <atom1> <atom2> <cutoff>]
                [-filter_angle <atom1> <atom2> <atom3> <cutoff>]
                [-verbose <True|False>]
+    fieldtools --parameter-file <parameter file> [options]
 
 Run `fieldtools -h` for a description of all options, and `fieldtools --version` for the version.
 `utils/FieldTools_pytraj.py` is equivalent to `fieldtools -backend pytraj`.
@@ -110,6 +111,43 @@ molecule (residues that are neither amino acids nor solvent, e.g. ligands and co
 - `.xtc` files store coordinates with a precision of 0.01 Å, which changes fields from nearby atoms by up to about 1%.
   Use `.trr` files (or a higher `compressed-x-precision`) when this matters.
 - `data/KPC.top` and `data/KPC.xtc` are the Amber example system converted to GROMACS format.
+
+### Parameter files
+Instead of a long command line, all options can be kept in a parameter file in [TOML](https://toml.io) format,
+which also makes runs easy to reproduce:
+
+```toml
+# MnMT4 methyl transfer, reactive frames only
+[input]
+top = "MnMT4.tpr"
+traj = "md.xtc"
+
+[targets]
+targets = ["IAA/O1 SAM/SD", "IAA/O2 SAM/SD"]   # one or two atoms per target
+exclude = ["IAA SAM"]                           # one entry per target, or one for all targets
+
+[system]
+pbc = true
+
+[filters]
+distance = ["IAA/O1 SAM/CE 3.2"]
+angle = ["IAA/O1 SAM/CE SAM/SD 160"]
+
+[output]
+out = "field.pkl"
+vector_out = "vectors.pkl"
+```
+
+    fieldtools --parameter-file run.toml
+    fieldtools --parameter-file run.toml -traj md2.xtc -out field2.pkl     # override some options
+
+- Options on the command line override the parameter file; a filter on the command line replaces the file's
+  filters of that kind.
+- Relative paths are relative to the folder of the parameter file, so it can be run from anywhere.
+- Targets and exclusions can be listed in the file (`targets`, `exclude`) or given as files (`target_file`, `exclude_file`).
+- Unknown sections or keys are reported as errors, so typos are not silently ignored.
+- `fieldtools --write-parameter-file run.toml` writes a commented template with all options; added to a complete
+  command line, it writes that command's options to the file instead of running it.
 
 ### Atom specifiers
 Two equivalent syntaxes can be mixed freely in target and exclusion files:

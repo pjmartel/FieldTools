@@ -20,6 +20,7 @@ import warnings
 import numpy as np
 
 from . import __version__
+from .parameters import load_parameter_file, write_parameter_file
 
 ### Physical constants (CODATA 2018)
 BOHR = 0.529177210903                       # Angstrom
@@ -67,6 +68,24 @@ Output (-out): pickled dictionary
   For point targets, each component is the magnitude of that component's field
   vector, so magnitudes of the components do not add up to the Total.
 
+Parameter file (--parameter-file params.toml):
+  All options can be stored in a TOML file, in sections, e.g.
+    [input]
+    top = "topol.tpr"
+    traj = "traj.xtc"
+    [targets]
+    targets = ["IAA/O1 SAM/SD", "IAA/O2 SAM/SD"]
+    exclude = ["IAA SAM"]
+    [system]
+    pbc = true
+    [filters]
+    distance = ["IAA/O1 SAM/CE 3.2"]
+    [output]
+    out = "field.pkl"
+  Options on the command line override the file. Relative paths are relative to the
+  folder of the parameter file. fieldtools --write-parameter-file params.toml writes a
+  commented template, or the options of the rest of the command line.
+
 Frame filters (-filter_distance, -filter_angle):
   Fields are only calculated for frames that pass all filters, e.g. reactive geometries:
     -filter_distance :IAA@O1 :SAM@CE 3.2            distance <= 3.2 A
@@ -113,12 +132,17 @@ def build_parser():
         allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"FieldTools {__version__}")
-    parser.add_argument("-nc", "-traj", dest="nc", required=True,
-                        help="trajectory file (Amber .nc/.mdcrd, GROMACS .xtc/.trr, ...)")
-    parser.add_argument("-parm", "-top", dest="parm", required=True,
-                        help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top)")
-    parser.add_argument("-target", required=True, help="target file (see below)")
-    parser.add_argument("-out", required=True, help="output file for the fields (.pkl)")
+    parser.add_argument("--parameter-file", dest="parameter_file", metavar="FILE",
+                        help="read the options from a parameter file (TOML, see below); "
+                             "options given on the command line override it")
+    parser.add_argument("--write-parameter-file", dest="write_parameter_file", metavar="FILE",
+                        help="write the options of this command line to a parameter file and exit")
+    parser.add_argument("-nc", "-traj", dest="nc",
+                        help="trajectory file (Amber .nc/.mdcrd, GROMACS .xtc/.trr, ...) [required]")
+    parser.add_argument("-parm", "-top", dest="parm",
+                        help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top) [required]")
+    parser.add_argument("-target", help="target file (see below) [required]")
+    parser.add_argument("-out", help="output file for the fields (.pkl) [required]")
     parser.add_argument("-solvent", default="auto",
                         help="comma separated list of non-protein residue names, or auto to use the "
                              "common water and ion residue names found in the system [default: auto]")
@@ -163,11 +187,32 @@ def build_parser():
 
 
 def parse_arguments(argv):
+    """Options from the command line and the parameter file (the command line takes precedence)."""
     parser = build_parser()
+    pre_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre_parser.add_argument("--parameter-file", dest="parameter_file")
+    file_values = {}
+    if "-h" not in argv and "--help" not in argv:
+        parameter_file = pre_parser.parse_known_args(argv)[0].parameter_file
+        if parameter_file:
+            file_values = load_parameter_file(parameter_file)
+    # Filters are lists: file values only apply if the command line gives none of that kind
+    file_filters = {k: file_values.pop(k) for k in ("filter_distance", "filter_angle") if k in file_values}
+    parser.set_defaults(**file_values)
     args = parser.parse_args(argv)
+    for dest, value in file_filters.items():
+        if not getattr(args, dest):
+            setattr(args, dest, value)
+
+    args.solvent = None if args.solvent == "auto" else [i for i in args.solvent.split(",") if i]
+    if args.write_parameter_file:
+        return args
+    missing = [flag for dest, flag in (("parm", "-top"), ("nc", "-traj"), ("target", "-target"), ("out", "-out"))
+               if not getattr(args, dest)]
+    if missing:
+        parser.error(f"missing {', '.join(missing)} (give it on the command line or in the parameter file)")
     if args.use_qm_charges and (args.qm_charges is None or args.qm_dict is None):
         parser.error("-use_qm_charges True requires -qm_charges and -qm_dict")
-    args.solvent = None if args.solvent == "auto" else [i for i in args.solvent.split(",") if i]
     return args
 
 
@@ -243,7 +288,7 @@ def load_mdanalysis(parm, nc, gmx_include=None):
         warnings.simplefilter("ignore", category=DeprecationWarning)
         try:
             u = mda.Universe(parm, nc, **kwargs)
-        except (IOError, ValueError) as error:
+        except (IOError, ValueError, TypeError) as error:
             hint = ""
             if "topology_format" in kwargs and "Could not find" in str(error):
                 hint = "\nSet the directory with the GROMACS force fields with -gmx_include."
@@ -261,9 +306,9 @@ def load_mdanalysis(parm, nc, gmx_include=None):
     atoms = u.atoms
 
     # MDAnalysis releases up to 2.10 return coordinates read from a .tpr file in nm instead of A
-    from MDAnalysis.coordinates.TPR import TPRReader
     version = tuple(int(v) for v in re.findall(r"\d+", mda.__version__)[:2])
-    scale = 10.0 if isinstance(u.trajectory, TPRReader) and version < (2, 11) else 1.0
+    reads_tpr_coordinates = type(u.trajectory).__name__ == "TPRReader"   # MDAnalysis >= 2.10
+    scale = 10.0 if reads_tpr_coordinates and version < (2, 11) else 1.0
     if scale != 1.0:
         print(f"Note: converting the coordinates of {nc} from nm to A (not done by MDAnalysis {mda.__version__}).")
 
@@ -296,17 +341,18 @@ def load_pytraj(parm, nc):
                   top.charge, traj.n_frames, frames)
 
 
+def is_installed(module):
+    import importlib.util
+    return importlib.util.find_spec(module) is not None
+
+
 def load_system(parm, nc, backend="auto", gmx_include=None):
-    if backend in ("auto", "mdanalysis"):
-        try:
-            return load_mdanalysis(parm, nc, gmx_include)
-        except ImportError:
-            if backend == "mdanalysis":
-                raise
-    try:
-        return load_pytraj(parm, nc)
-    except ImportError:
+    # Fall back to pytraj only if MDAnalysis is not installed, so that other errors are not hidden
+    if backend == "mdanalysis" or (backend == "auto" and is_installed("MDAnalysis")):
+        return load_mdanalysis(parm, nc, gmx_include)
+    if not is_installed("pytraj"):
         sys.exit("Error! Neither MDAnalysis nor pytraj is installed (pip install mdanalysis).")
+    return load_pytraj(parm, nc)
 
 
 #####################################################################################
@@ -377,8 +423,11 @@ def select_one_atom(spec, system):
 
 
 def load_targets(target_file, system):
+    """Targets from a target file, or from a list of lines (parameter file)."""
     targets = []
-    for line in read_lines(target_file):
+    lines = [line.strip() for line in target_file if line.strip()] if isinstance(target_file, list) \
+        else read_lines(target_file)
+    for line in lines:
         specs = line.split()
         if len(specs) > 2:
             sys.exit(f"Error! Target '{line}' has {len(specs)} atoms; use one (atom) or two (bond).")
@@ -388,19 +437,23 @@ def load_targets(target_file, system):
             "atoms": [select_one_atom(spec, system) for spec in specs],
         })
     if not targets:
-        sys.exit(f"Error! No targets defined in {target_file}.")
+        sys.exit("Error! No targets defined.")
     return targets
 
 
 def load_exclusions(exclude_file, targets, system):
     """Boolean mask (n_atoms) of excluded atoms for each target."""
-    lines = read_lines(exclude_file) if exclude_file else []
+    if isinstance(exclude_file, list):   # from a parameter file
+        lines = [line.strip() for line in exclude_file if line.strip()]
+    else:
+        lines = read_lines(exclude_file) if exclude_file else []
     if lines in ([], ["False"]):
         lines = None
     elif len(lines) == 1:
         lines = lines * len(targets)
     elif len(lines) != len(targets):
-        sys.exit(f"Error! {exclude_file} has {len(lines)} lines but there are {len(targets)} targets. "
+        source = "The exclusion list" if isinstance(exclude_file, list) else exclude_file
+        sys.exit(f"Error! {source} has {len(lines)} lines but there are {len(targets)} targets. "
                  "Use one line per target or a single line for all targets.")
 
     for i, target in enumerate(targets):
@@ -849,14 +902,21 @@ def write_frames(path, result):
 
 def main(argv=None):
     args = parse_arguments(sys.argv[1:] if argv is None else argv)
+    if args.write_parameter_file:
+        write_parameter_file(args.write_parameter_file, args)
+        print("Parameter file written to : ", args.write_parameter_file)
+        return None
 
+    show = lambda value: " | ".join(value) if isinstance(value, list) else value
+    if args.parameter_file:
+        print("--parameter-file                     : ", args.parameter_file)
     print("-nc             Trajectory file      : ", args.nc)
     print("-parm           Parameter file       : ", args.parm)
-    print("-target         Field target         : ", args.target)
+    print("-target         Field target         : ", show(args.target))
     print("-out            Output file          : ", args.out)
     print("-solvent        Non-protein residues : ", ",".join(args.solvent) if args.solvent else "auto")
     print("-exclude_atoms  Atoms excluded       : ",
-          args.exclude_atoms or "Full residue of the first atom of each target")
+          show(args.exclude_atoms) or "Full residue of the first atom of each target")
     for f in args.filter_distance:
         print("-filter_distance: ", " ".join(f))
     for f in args.filter_angle:
