@@ -16,6 +16,8 @@ dependencies = [
     "numpy",
     "MDAnalysis>=2.8",
     "tomli>=1.1; python_version < '3.11'",
+    "matplotlib",
+    "tornado",       # web server of matplotlib's WebAgg backend (fieldplot -webagg)
 ]
 classifiers = [
     # This fork is installed from its repository only. PyPI rejects uploads with this
@@ -27,7 +29,6 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest", "MDAnalysisTests"]
-notebook = ["matplotlib"]
 # Development version of MDAnalysis, needed for .tpr files from GROMACS 2026 (tpx 138).
 # Built from source (needs git and a C compiler). Remove once MDAnalysis 2.11 is released.
 mdanalysis-dev = [
@@ -37,6 +38,7 @@ mdanalysis-dev = [
 [project.scripts]
 fieldtools = "fieldtools.fields:cli"
 qmchargestools = "fieldtools.qmcharges:main"
+fieldplot = "fieldtools.plot:cli"
 
 [project.urls]
 Repository = "https://github.com/pjmartel/FieldTools"

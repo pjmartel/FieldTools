@@ -42,9 +42,9 @@ With venv and pip:
     source .venv/bin/activate
     pip install -e .
 
-This installs the commands `fieldtools` and `qmchargestools`. With `-e` (editable), changes to the code in the
+This installs the commands `fieldtools`, `fieldplot` and `qmchargestools`. With `-e` (editable), changes to the code in the
 repository take effect without reinstalling; leave it out to install a fixed copy. Optional extras:
-`pip install -e ".[test]"` (pytest and test data) and `".[notebook]"` (matplotlib).
+`pip install -e ".[test]"` (pytest and test data).
 
 - For GROMACS 2026 `.tpr` files, install with the development version of MDAnalysis:
   `pip install -e ".[mdanalysis-dev]"` (or `uv pip install -e ".[mdanalysis-dev]"`). It is built from source,
@@ -93,6 +93,27 @@ each filter on its own, which helps to choose cutoffs and to see which filter re
 **Charges.** At the start of every run, FieldTools prints the total charge of the system (with a warning if it is
 not an integer), of each segment (chains and molecules in GROMACS topologies), of the protein, of each hetero
 molecule (residues that are neither amino acids nor solvent, e.g. ligands and cofactors) and of each solvent species.
+
+### Plots
+`fieldplot` draws a bar plot of the field contribution of every residue from the fields file written by `fieldtools`:
+the bar is the mean over the trajectory frames, the error bar the standard deviation.
+
+    fieldplot field.pkl                                              # all targets -> field_residues.png
+    fieldplot field.pkl -target "40/C7_40/O71" -highlight 43,136,205-207 -out bond.pdf
+    fieldplot field.pkl -vectors vectors.pkl -residues 1-261 -csv residues.csv
+    fieldplot field.pkl -webagg -port 8988                           # interactive, at http://127.0.0.1:8988
+
+- `-highlight` colors the bars of the given residue numbers differently (with a light band, so that residues with
+  small values can still be found) and labels them. `-residues` limits the plot to a range of residues.
+- Bond targets show the projected field (signed). Point targets show the field magnitude, which is not additive;
+  with `-vectors` (the file from `fieldtools -vector_out`), they show each residue's field projected onto the
+  direction of the total field instead, which is signed and adds up to the total.
+- `-out` saves the plot (`.png`, `.pdf`, `.svg`, ...); `-csv` writes the plotted means and standard deviations.
+- `-webagg` serves the interactive plot (zoom, pan, and a tooltip with residue, mean and SD on each bar) on a web server
+  without opening a browser; stop it with Ctrl+C. It listens on `127.0.0.1` (this computer only) by default. To view
+  it from another computer, forward the port with SSH (`ssh -L 8988:localhost:8988 user@server`) and open
+  `http://localhost:8988` there, or use `-host 0.0.0.0` to listen on the network (anyone who can reach the port can
+  then see the plot).
 
 ### GROMACS
     fieldtools -top topol.tpr -traj traj.xtc -target target.dat -pbc True -out field.pkl
