@@ -274,9 +274,9 @@ def build_parser():
                         help="serve the interactive plot on a web server (WebAgg) instead of only "
                              "saving it; no browser is opened. Stop with Ctrl+C")
     parser.add_argument("-port", type=int, default=8988, help="port of the web server [default: 8988]")
-    parser.add_argument("-host", default="127.0.0.1",
-                        help="address the web server listens on [default: 127.0.0.1, this computer "
-                             "only; 0.0.0.0 makes it reachable from the network]")
+    parser.add_argument("-host", default="0.0.0.0",
+                        help="address the web server listens on [default: 0.0.0.0, reachable from other "
+                             "machines on the network; 127.0.0.1 for this computer only]")
     return parser
 
 
@@ -288,6 +288,49 @@ def check_port(host, port):
             test.bind((host, port))
         except OSError as error:
             sys.exit(f"Error! Cannot serve on {host}:{port} ({error.strerror}). Choose another port with -port.")
+
+
+def local_ip():
+    """IP address of this machine on the network (no data is sent)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("10.255.255.255", 1))
+            return probe.getsockname()[0]
+        except OSError:
+            return None
+
+
+def server_links(host, port):
+    """Links to open the plot: with the machine's name and IP address when listening on all interfaces."""
+    import socket
+    if host not in ("0.0.0.0", "", "::"):
+        return [f"http://{host}:{port}"]
+    fqdn, name = socket.getfqdn().rstrip("."), socket.gethostname()
+    links = [f"http://{fqdn if '.' in fqdn else name}:{port}"]
+    ip = local_ip()
+    if ip and not ip.startswith("127."):
+        links.append(f"http://{ip}:{port}")
+    return links
+
+
+class DropLines:
+    """Stream that hides lines starting with a given text (matplotlib's own, unusable 0.0.0.0 link)."""
+
+    def __init__(self, stream, prefix):
+        self.stream, self.prefix, self.dropped = stream, prefix, False
+
+    def write(self, text):
+        if text.startswith(self.prefix):
+            self.dropped = not text.endswith("\n")   # print() sends the newline separately
+        elif self.dropped and text == "\n":
+            self.dropped = False
+        else:
+            self.dropped = False
+            self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
 
 
 def load_pickle(path, kind):
@@ -340,7 +383,16 @@ def main(argv=None):
         write_csv(args.csv, tables)
         print("Values written to : ", args.csv)
     if args.webagg:
-        plt.show()
+        print("\nPlot served at (open in a browser on any machine that can reach this one; Ctrl+C to stop):")
+        for link in server_links(args.host, args.port):
+            print("   ", link)
+        sys.stdout.flush()
+        stdout = sys.stdout
+        sys.stdout = DropLines(stdout, "To view figure, visit")
+        try:
+            plt.show()
+        finally:
+            sys.stdout = stdout
     return fig, tables
 
 

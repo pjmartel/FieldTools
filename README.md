@@ -110,10 +110,11 @@ the bar is the mean over the trajectory frames, the error bar the standard devia
   direction of the total field instead, which is signed and adds up to the total.
 - `-out` saves the plot (`.png`, `.pdf`, `.svg`, ...); `-csv` writes the plotted means and standard deviations.
 - `-webagg` serves the interactive plot (zoom, pan, and a tooltip with residue, mean and SD on each bar) on a web server
-  without opening a browser; stop it with Ctrl+C. It listens on `127.0.0.1` (this computer only) by default. To view
-  it from another computer, forward the port with SSH (`ssh -L 8988:localhost:8988 user@server`) and open
-  `http://localhost:8988` there, or use `-host 0.0.0.0` to listen on the network (anyone who can reach the port can
-  then see the plot).
+  without opening a browser; stop it with Ctrl+C. It prints links with the machine's name and IP address
+  (e.g. `http://marvin.example.org:8988`) that can be opened in a browser on any machine that can reach this one.
+  By default it listens on all network interfaces (`0.0.0.0`), so anyone who can reach the port can see the plot;
+  use `-host 127.0.0.1` to allow this computer only (and, from elsewhere, an SSH tunnel:
+  `ssh -L 8988:localhost:8988 user@server`, then open `http://localhost:8988`). A firewall may need to allow the port.
 
 ### GROMACS
     fieldtools -top topol.tpr -traj traj.xtc -target target.dat -pbc True -out field.pkl

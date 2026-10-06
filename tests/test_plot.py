@@ -105,3 +105,19 @@ def test_busy_port_is_reported():
         with pytest.raises(SystemExit) as error:
             plot.check_port("127.0.0.1", port)
     assert "Choose another port" in str(error.value)
+
+
+def test_server_links():
+    assert plot.server_links("127.0.0.1", 8988) == ["http://127.0.0.1:8988"]
+    links = plot.server_links("0.0.0.0", 8988)
+    assert links and all(link.startswith("http://") and link.endswith(":8988") for link in links)
+    assert not any("0.0.0.0" in link or ".:" in link for link in links)
+
+
+def test_matplotlib_link_is_hidden():
+    import io
+    stream = io.StringIO()
+    hidden = plot.DropLines(stream, "To view figure, visit")
+    print("To view figure, visit http://0.0.0.0:8988", file=hidden)
+    print("Press Ctrl+C to stop WebAgg server", file=hidden)
+    assert stream.getvalue() == "Press Ctrl+C to stop WebAgg server\n"
