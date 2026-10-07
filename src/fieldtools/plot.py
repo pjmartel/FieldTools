@@ -27,6 +27,7 @@ TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
 GRID = "#e4e3df"
 SURFACE = "#fcfcfb"
+LABELS = ("Highlighted residues", "Other residues")   # legend labels: highlighted, other
 
 
 #####################################################################################
@@ -122,7 +123,7 @@ def style_axes(ax):
     ax.set_axisbelow(True)
 
 
-def plot_target(ax, fields, vectors, target, rows, n_frames):
+def plot_target(ax, fields, vectors, target, rows, n_frames, labels=LABELS):
     from matplotlib.patches import Patch
 
     style_axes(ax)
@@ -164,8 +165,8 @@ def plot_target(ax, fields, vectors, target, rows, n_frames):
     ax.set_xlabel("Residue number", fontsize=9, color=TEXT_SECONDARY)
     ax.set_ylabel(axis_label(target, vectors), fontsize=9, color=TEXT_SECONDARY)
     if any(r["highlighted"] for r in rows):
-        ax.legend(handles=[Patch(color=COLOR_HIGHLIGHT, label="Highlighted residues"),
-                           Patch(color=COLOR_BAR, label="Other residues")],
+        ax.legend(handles=[Patch(color=COLOR_HIGHLIGHT, label=labels[0]),
+                           Patch(color=COLOR_BAR, label=labels[1])],
                   loc="upper right", frameon=False, fontsize=8, labelcolor=TEXT_SECONDARY)
     return bars
 
@@ -220,7 +221,7 @@ def add_hover(fig, plotted):
     fig.canvas.mpl_connect("motion_notify_event", on_move)
 
 
-def make_figure(fields, vectors, targets, residues, highlight):
+def make_figure(fields, vectors, targets, residues, highlight, labels=LABELS):
     import matplotlib.pyplot as plt
 
     tables = {t: residue_table(fields, vectors, t, residues, highlight) for t in targets}
@@ -231,7 +232,7 @@ def make_figure(fields, vectors, targets, residues, highlight):
     plotted = []
     for ax, target in zip(axes[:, 0], targets):
         n_frames = len(fields[target]["Total"])
-        bars = plot_target(ax, fields, vectors, target, tables[target], n_frames)
+        bars = plot_target(ax, fields, vectors, target, tables[target], n_frames, labels)
         plotted.append((ax, tables[target], bars))
     add_hover(fig, plotted)
     return fig, tables
@@ -267,6 +268,11 @@ def build_parser():
                         help="target to plot, as named in the fields file (repeat for several) [default: all]")
     parser.add_argument("-highlight", default="",
                         help="residue numbers whose bars are colored differently, e.g. 70,130,234-237")
+    parser.add_argument("-highlight_label", default="Highlighted residues",
+                        help="legend label of the highlighted residues, e.g. \"Mutants\" "
+                             "[default: Highlighted residues]")
+    parser.add_argument("-other_label", default="Other residues",
+                        help="legend label of the other residues [default: Other residues]")
     parser.add_argument("-residues", default=None,
                         help="only plot these residue numbers, e.g. 1-305")
     parser.add_argument("-vectors", default=None,
@@ -377,7 +383,8 @@ def main(argv=None):
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, tables = make_figure(fields, vectors, targets, residues, highlight)
+    fig, tables = make_figure(fields, vectors, targets, residues, highlight,
+                              (args.highlight_label, args.other_label))
     for target, rows in tables.items():
         missing = sorted(highlight - {r["resid"] for r in rows})
         if missing:

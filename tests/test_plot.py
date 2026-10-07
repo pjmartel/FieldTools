@@ -121,3 +121,10 @@ def test_matplotlib_link_is_hidden():
     print("To view figure, visit http://0.0.0.0:8988", file=hidden)
     print("Press Ctrl+C to stop WebAgg server", file=hidden)
     assert stream.getvalue() == "Press Ctrl+C to stop WebAgg server\n"
+
+
+def test_legend_labels(results):
+    folder, _ = results
+    fig, _ = plot.main([str(folder / "field.pkl"), "-target", BOND, "-highlight", "136", "-out", str(folder / "l.png"),
+                        "-highlight_label", "Mutants", "-other_label", "Other positions"])
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()] == ["Mutants", "Other positions"]

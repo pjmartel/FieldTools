@@ -12,7 +12,7 @@ import os
 import sys
 
 from . import __version__
-from .plot import (COLOR_BAR, COLOR_HIGHLIGHT, GRID, HIGHLIGHT_BAND, SUMMARY, SURFACE, TEXT_PRIMARY,
+from .plot import (COLOR_BAR, COLOR_HIGHLIGHT, GRID, HIGHLIGHT_BAND, LABELS, SUMMARY, SURFACE, TEXT_PRIMARY,
                    TEXT_SECONDARY, axis_label, check_port, display_name, frame_values, label_shifts, load_pickle,
                    parse_residue_list, residue_table, server_links, statistics, write_csv)
 
@@ -29,7 +29,7 @@ def subtitle(fields, vectors, target):
     return f"Mean ± SD over {n_frames} frames · " + " · ".join(parts) + " MV/cm"
 
 
-def make_figure(fields, vectors, targets, residues=None, highlight=()):
+def make_figure(fields, vectors, targets, residues=None, highlight=(), labels=LABELS):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -41,8 +41,7 @@ def make_figure(fields, vectors, targets, residues=None, highlight=()):
 
     for row_index, target in enumerate(targets, start=1):
         rows = tables[target]
-        for highlighted, name, color in ((False, "Other residues", COLOR_BAR),
-                                         (True, "Highlighted residues", COLOR_HIGHLIGHT)):
+        for highlighted, name, color in ((False, labels[1], COLOR_BAR), (True, labels[0], COLOR_HIGHLIGHT)):
             subset = [r for r in rows if r["highlighted"] == highlighted]
             if not subset:
                 continue
@@ -142,6 +141,11 @@ def build_parser():
                         help="target to plot, as named in the fields file (repeat for several) [default: all]")
     parser.add_argument("-highlight", default="",
                         help="residue numbers whose bars are colored differently, e.g. 70,130,234-237")
+    parser.add_argument("-highlight_label", default="Highlighted residues",
+                        help="legend label of the highlighted residues, e.g. \"Mutants\" "
+                             "[default: Highlighted residues]")
+    parser.add_argument("-other_label", default="Other residues",
+                        help="legend label of the other residues [default: Other residues]")
     parser.add_argument("-residues", default=None, help="only plot these residue numbers, e.g. 1-305")
     parser.add_argument("-vectors", default=None,
                         help="vectors file (.pkl) from fieldtools -vector_out: point targets are then plotted "
@@ -185,7 +189,8 @@ def main(argv=None):
     if args.serve:
         check_port(args.host, args.port)
 
-    fig, tables = make_figure(fields, vectors, targets, residues, highlight)
+    fig, tables = make_figure(fields, vectors, targets, residues, highlight,
+                              (args.highlight_label, args.other_label))
     for target, rows in tables.items():
         missing = sorted(highlight - {r["resid"] for r in rows})
         if missing:

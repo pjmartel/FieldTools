@@ -83,3 +83,10 @@ def test_errors(folder):
     with pytest.raises(SystemExit) as error:
         plotly_plot.main([str(folder / "field.pkl"), "-target", "nope"])
     assert "is not in" in str(error.value)
+
+
+def test_legend_labels(folder):
+    fig, _ = plotly_plot.main([str(folder / "field.pkl"), "-target", BOND, "-highlight", "136",
+                               "-highlight_label", "Mutants", "-other_label", "Other positions",
+                               "-out", str(folder / "l.html")])
+    assert [trace.name for trace in fig.data] == ["Other positions", "Mutants"]

@@ -104,7 +104,9 @@ the bar is the mean over the trajectory frames, the error bar the standard devia
     fieldplot field.pkl -webagg -port 8988                           # interactive, at http://127.0.0.1:8988
 
 - `-highlight` colors the bars of the given residue numbers differently (with a light band, so that residues with
-  small values can still be found) and labels them. `-residues` limits the plot to a range of residues.
+  small values can still be found) and labels them, e.g. `-highlight 43,136,205-207`. `-highlight_label` and
+  `-other_label` change the legend labels (e.g. `-highlight_label Mutants`). `-residues` limits the plot to a range
+  of residues.
 - Bond targets show the projected field (signed). Point targets show the field magnitude, which is not additive;
   with `-vectors` (the file from `fieldtools -vector_out`), they show each residue's field projected onto the
   direction of the total field instead, which is signed and adds up to the total.
@@ -118,7 +120,7 @@ the bar is the mean over the trajectory frames, the error bar the standard devia
 
 #### Interactive plots with Plotly
 `fieldplotly` draws the same per-residue plot with [Plotly](https://plotly.com/python/) and takes the same options
-(`-target`, `-highlight`, `-residues`, `-vectors`, `-csv`). The result is a standalone web page with zoom and pan,
+(`-target`, `-highlight`, `-highlight_label`, `-other_label`, `-residues`, `-vectors`, `-csv`). The result is a standalone web page with zoom and pan,
 a range slider along the residues, panels that zoom together, hover details on every bar, and a legend that hides or
 shows the highlighted and other residues:
 
