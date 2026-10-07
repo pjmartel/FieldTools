@@ -42,7 +42,7 @@ With venv and pip:
     source .venv/bin/activate
     pip install -e .
 
-This installs the commands `fieldtools`, `fieldplot` and `qmchargestools`. With `-e` (editable), changes to the code in the
+This installs the commands `fieldtools`, `fieldplot`, `fieldplotly` and `qmchargestools`. With `-e` (editable), changes to the code in the
 repository take effect without reinstalling; leave it out to install a fixed copy. Optional extras:
 `pip install -e ".[test]"` (pytest and test data).
 
@@ -115,6 +115,23 @@ the bar is the mean over the trajectory frames, the error bar the standard devia
   By default it listens on all network interfaces (`0.0.0.0`), so anyone who can reach the port can see the plot;
   use `-host 127.0.0.1` to allow this computer only (and, from elsewhere, an SSH tunnel:
   `ssh -L 8988:localhost:8988 user@server`, then open `http://localhost:8988`). A firewall may need to allow the port.
+
+#### Interactive plots with Plotly
+`fieldplotly` draws the same per-residue plot with [Plotly](https://plotly.com/python/) and takes the same options
+(`-target`, `-highlight`, `-residues`, `-vectors`, `-csv`). The result is a standalone web page with zoom and pan,
+a range slider along the residues, panels that zoom together, hover details on every bar, and a legend that hides or
+shows the highlighted and other residues:
+
+    fieldplotly field.pkl -highlight 43,136,205-207                 # -> field_residues.html
+    fieldplotly field.pkl -vectors vectors.pkl -out point.html
+    fieldplotly field.pkl -serve -port 8988                         # serve it, and print the links to open
+
+- The `.html` file embeds the Plotly JavaScript, so it can be opened offline or sent to others (about 5 MB);
+  `-cdn` makes a much smaller file that loads Plotly from the internet when opened.
+- `-serve` (alias `-webagg`) serves the page like `fieldplot -webagg`, with the same `-port` and `-host` options and links.
+- `-out` with `.png`, `.pdf` or `.svg` writes a static image; this needs the optional `kaleido` package
+  (`pip install kaleido`, which downloads a headless Chrome the first time). `fieldplot` writes static images
+  without extra packages.
 
 ### GROMACS
     fieldtools -top topol.tpr -traj traj.xtc -target target.dat -pbc True -out field.pkl

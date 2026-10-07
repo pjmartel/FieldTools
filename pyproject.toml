@@ -18,6 +18,7 @@ dependencies = [
     "tomli>=1.1; python_version < '3.11'",
     "matplotlib",
     "tornado",       # web server of matplotlib's WebAgg backend (fieldplot -webagg)
+    "plotly",        # fieldplotly
 ]
 classifiers = [
     # This fork is installed from its repository only. PyPI rejects uploads with this
@@ -39,6 +40,7 @@ mdanalysis-dev = [
 fieldtools = "fieldtools.fields:cli"
 qmchargestools = "fieldtools.qmcharges:main"
 fieldplot = "fieldtools.plot:cli"
+fieldplotly = "fieldtools.plotly_plot:cli"
 
 [project.urls]
 Repository = "https://github.com/pjmartel/FieldTools"

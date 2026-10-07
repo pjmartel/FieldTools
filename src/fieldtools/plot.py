@@ -143,21 +143,13 @@ def plot_target(ax, fields, vectors, target, rows, n_frames):
     # neighbouring highlighted residues on the same side are spread sideways so they do not overlap.
     span = np.nanmax(np.abs(means) + sds) if len(x) else 1.0
     labelled = [r for r in rows if r["highlighted"]]
-    groups = []
-    for row in labelled:
-        side = row["mean"] >= 0
-        if groups and groups[-1][-1]["resid"] >= row["resid"] - 3 and (groups[-1][-1]["mean"] >= 0) == side:
-            groups[-1].append(row)
-        else:
-            groups.append([row])
-    for group in groups:
-        for i, row in enumerate(group):
-            up = row["mean"] >= 0
-            end = row["mean"] + (1 if up else -1) * row["sd"]
-            ax.annotate(f"{row['resname']} {row['resid']}", (row["resid"], end),
-                        xytext=((i - (len(group) - 1) / 2) * 9, 3 if up else -3), textcoords="offset points",
-                        ha="center", va="bottom" if up else "top",
-                        rotation=90, fontsize=7, color=TEXT_PRIMARY, zorder=5)
+    for row, shift in label_shifts(rows):
+        up = row["mean"] >= 0
+        end = row["mean"] + (1 if up else -1) * row["sd"]
+        ax.annotate(f"{row['resname']} {row['resid']}", (row["resid"], end),
+                    xytext=(shift * 9, 3 if up else -3), textcoords="offset points",
+                    ha="center", va="bottom" if up else "top",
+                    rotation=90, fontsize=7, color=TEXT_PRIMARY, zorder=5)
     room = 1.45 if labelled else 1.15   # headroom for the labels
     ax.set_ylim(-room * span if (means < 0).any() else -0.05 * span, room * span if (means > 0).any() else 0.05 * span)
 
@@ -176,6 +168,22 @@ def plot_target(ax, fields, vectors, target, rows, n_frames):
                            Patch(color=COLOR_BAR, label="Other residues")],
                   loc="upper right", frameon=False, fontsize=8, labelcolor=TEXT_SECONDARY)
     return bars
+
+
+def label_shifts(rows):
+    """(row, sideways shift in label widths) for each highlighted residue.
+
+    Labels of highlighted residues within 3 residues of each other, on the same side of zero,
+    are spread sideways around their bars so they do not overlap.
+    """
+    groups = []
+    for row in (r for r in rows if r["highlighted"]):
+        up = row["mean"] >= 0
+        if groups and groups[-1][-1]["resid"] >= row["resid"] - 3 and (groups[-1][-1]["mean"] >= 0) == up:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return [(row, i - (len(group) - 1) / 2) for group in groups for i, row in enumerate(group)]
 
 
 def add_hover(fig, plotted):
