@@ -170,3 +170,47 @@ def test_log_file_records_errors(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         ft.main(["-top", PARM, "-traj", NC, "-target", "target.dat", "--prefix", "bad"])
     assert "Error! No atom in the system matches 'XX/CA'." in (tmp_path / "bad.log").read_text()
+
+
+OR_GROUPS = """
+[filters]
+distance = ["40/O71 264/O 2.5"]
+
+[[filters.or]]
+angle = ["264/O 40/C7 40/O71 112:180"]
+
+[[filters.or]]
+distance = ["40/C7 264/O 2.9"]
+angle = ["264/O 40/C7 40/O71 100:105"]
+"""
+
+
+def test_or_groups_in_parameter_file(tmp_path, parameter_file):
+    parameter_file.write_text(PARAMETERS.replace('[filters]\ndistance = ["40/O71 264/O 2.6"]\n', OR_GROUPS))
+    from_file = ft.main(["--parameter-file", str(parameter_file)])
+    cli = ft.main(["--parameter-file", str(parameter_file), "-out", str(tmp_path / "cli.pkl"),
+                   "-filter_distance", "40/O71", "264/O", "2.5", "-or",
+                   "-filter_angle", "264/O", "40/C7", "40/O71", "112:180", "-or",
+                   "-filter_distance", "40/C7", "264/O", "2.9", "-filter_angle", "264/O", "40/C7", "40/O71", "100:105"])
+    assert from_file["frames"] == cli["frames"] and from_file["frame_groups"] == cli["frame_groups"]
+    assert sorted(from_file["group_counts"]) == [1, 2, 3]
+
+    written = tmp_path / "written.toml"
+    ft.main(["--parameter-file", str(parameter_file), "--write-parameter-file", str(written)])
+    assert written.read_text().count("[[filters.or]]") == 2
+    again = ft.main(["--parameter-file", str(written)])
+    assert again["frames"] == from_file["frames"] and again["frame_groups"] == from_file["frame_groups"]
+
+
+def test_invalid_or_table(tmp_path):
+    path = tmp_path / "bad.toml"
+    path.write_text('[[filters.or]]\ndistanse = ["40/O71 264/O 2.5"]\n')
+    with pytest.raises(SystemExit) as error:
+        ft.main(["--parameter-file", str(path)])
+    assert "unknown key 'distanse' in [[filters.or]]" in str(error.value)
+
+
+def test_frames_all_in_parameter_file(tmp_path, parameter_file):
+    parameter_file.write_text(PARAMETERS.replace('out = "field.pkl"', 'out = "field.pkl"\nframes_all = true'))
+    ft.main(["--parameter-file", str(parameter_file)])
+    assert len((tmp_path / "field_frames.dat").read_text().splitlines()) == 11      # header + 10 frames

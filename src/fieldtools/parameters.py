@@ -37,11 +37,13 @@ SCHEMA = {
     "filters": {
         "distance": ("filter_distance", LIST, "\"ATOM1 ATOM2 CUTOFF\" entries: distance <= CUTOFF (A) or MIN:MAX"),
         "angle": ("filter_angle", LIST, "\"ATOM1 ATOM2 ATOM3 CUTOFF\" entries: angle >= CUTOFF (deg) or MIN:MAX"),
+        # further groups: [[filters.or]] tables with distance/angle keys (see load_or_groups)
     },
     "output": {
         "out": ("out", PATH, "fields (.pkl)"),
         "energy_out": ("energy_out", PATH, "Coulomb energies (.pkl)"),
         "vector_out": ("vector_out", PATH, "field vectors (.pkl)"),
+        "frames_all": ("frames_all", BOOL, "list all frames in <out>_frames.dat (kept column 1/0), not only kept ones"),
         "prefix": ("prefix", TEXT, "added with _ to the names of all output files (out defaults to field.pkl); also writes <prefix>.log"),
     },
     "qm": {
@@ -81,6 +83,9 @@ def load_parameter_file(path):
             error(f"'{section}' must be a section written as [{section}].")
         section = section.lower()
         for key, value in entries.items():
+            if section == "filters" and key.lower() == "or":   # [[filters.or]] tables: alternative filter groups
+                values["filter_or"] = load_or_groups(value)
+                continue
             name = ALIASES.get((section, key.lower()), key.lower())
             if name not in SCHEMA[section]:
                 error(f"unknown key '{key}' in [{section}]. Valid keys: {', '.join(SCHEMA[section])}")
@@ -91,14 +96,46 @@ def load_parameter_file(path):
 
     if "solvent" in values and isinstance(values["solvent"], list):
         values["solvent"] = ",".join(values["solvent"])
-    for dest, n_tokens in FILTER_TOKENS.items():
-        if dest in values:
-            values[dest] = [entry.split() for entry in values[dest]]
-            for tokens in values[dest]:
-                if len(tokens) != n_tokens:
-                    error(f"filter '{' '.join(tokens)}' must have {n_tokens} parts: "
-                          f"{n_tokens - 1} atoms and a cutoff.")
+    # Filter groups: [filters] is the first group, each [[filters.or]] table another one
+    first = [(KIND[dest], tokens) for dest in FILTER_TOKENS for tokens in split_filters(values.pop(dest, []), dest)]
+    groups = ([first] if first else []) + values.pop("filter_or", [])
+    if groups:
+        values["filter_groups"] = groups
     return values
+
+
+KIND = {"filter_distance": "distance", "filter_angle": "angle"}
+
+
+def split_filters(entries, dest):
+    """'ATOM1 ATOM2 CUTOFF' strings -> token lists, checking the number of parts."""
+    n_tokens = FILTER_TOKENS[dest]
+    tokens = [entry.split() for entry in entries]
+    for t in tokens:
+        if len(t) != n_tokens:
+            error(f"filter '{' '.join(t)}' must have {n_tokens} parts: {n_tokens - 1} atoms and a cutoff.")
+    return tokens
+
+
+def load_or_groups(tables):
+    """[[filters.or]] tables -> list of filter groups [(kind, tokens), ...]."""
+    if isinstance(tables, dict):
+        tables = [tables]
+    if not isinstance(tables, list) or not all(isinstance(t, dict) for t in tables):
+        error("alternative filter groups must be written as [[filters.or]] tables.")
+    groups = []
+    for table in tables:
+        group = []
+        for key, value in table.items():
+            name = key.lower()
+            if name not in ("distance", "angle"):
+                error(f"unknown key '{key}' in [[filters.or]]. Valid keys: distance, angle")
+            dest = SCHEMA["filters"][name][0]
+            group += [(name, t) for t in split_filters(convert(value, LIST, f"[[filters.or]] {name}", ""), dest)]
+        if not group:
+            error("a [[filters.or]] table has no distance or angle filters.")
+        groups.append(group)
+    return groups
 
 
 def convert(value, kind, name, folder):
@@ -150,8 +187,9 @@ def write_parameter_file(path, args):
                 value = "auto"
             elif dest == "solvent":
                 value = ",".join(value)
-            if dest in FILTER_TOKENS:
-                value = [" ".join(tokens) for tokens in value] if value else None
+            if dest in FILTER_TOKENS:   # the first filter group
+                groups = getattr(args, "filter_groups", None) or [[]]
+                value = [" ".join(t) for kind, t in groups[0] if kind == KIND[dest]] or None
             if name.endswith("_file") or name in ("targets", "exclude"):
                 is_list = isinstance(value, list)
                 if (name in ("targets", "exclude")) != is_list:
@@ -164,6 +202,21 @@ def write_parameter_file(path, args):
             else:
                 lines.append(f"{name} = {toml_value(value)}")
         lines.append("")
+        if section == "filters":   # further filter groups, combined with OR
+            groups = getattr(args, "filter_groups", None) or []
+            if len(groups) < 2:
+                lines += ["# Alternative filter group, combined with OR (a frame is used if it passes all filters",
+                          "# of [filters] or all filters of a [[filters.or]] table; repeat the table for more groups):",
+                          "# [[filters.or]]", '# distance = ["IAA/O2 SAM/CE 3.2"]',
+                          '# angle = ["IAA/O2 SAM/CE SAM/SD 160"]', ""]
+            for i, group in enumerate(groups[1:], start=2):
+                lines.append(f"# alternative filter group {i} (a frame is used if it passes all filters of any group)")
+                lines.append("[[filters.or]]")
+                for kind in ("distance", "angle"):
+                    entries = [" ".join(t) for k, t in group if k == kind]
+                    if entries:
+                        lines.append(f"{kind} = {toml_value(entries)}")
+                lines.append("")
     with open(path, "w") as f:
         f.write("\n".join(lines))
 

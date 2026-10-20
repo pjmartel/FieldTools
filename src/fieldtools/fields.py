@@ -87,10 +87,14 @@ Parameter file (--parameter-file params.toml):
   folder of the parameter file. fieldtools --write-parameter-file params.toml writes a
   commented template, or the options of the rest of the command line.
 
-Frame filters (-filter_distance, -filter_angle):
+Frame filters (-filter_distance, -filter_angle, -or):
   Fields are only calculated for frames that pass all filters, e.g. reactive geometries:
     -filter_distance :IAA@O1 :SAM@CE 3.2            distance <= 3.2 A
     -filter_angle :IAA@O1 :SAM@CE :SAM@SD 160       angle O1-CE-SD >= 160 degrees
+  -or starts an alternative group of filters: a frame is used if it passes all filters of
+  any group, e.g. either carboxylate oxygen in a reactive position:
+    -filter_distance IAA/O1 SAM/CE 3.2 -filter_angle IAA/O1 SAM/CE SAM/SD 160 -or
+    -filter_distance IAA/O2 SAM/CE 3.2 -filter_angle IAA/O2 SAM/CE SAM/SD 160
   A single value is a maximum distance or a minimum angle; use MIN:MAX for a range
   (e.g. 2.5:3.2). Both options can be given several times. The kept frames and the
   measured values are written to <out>_frames.dat.
@@ -176,6 +180,11 @@ def build_parser():
                         metavar=("ATOM1", "ATOM2", "ATOM3", "CUTOFF"),
                         help="only use frames where the ATOM1-ATOM2-ATOM3 angle (vertex ATOM2) is "
                              ">= CUTOFF (degrees) or within MIN:MAX; can be repeated")
+    parser.add_argument("-or", dest="filter_or", action="store_true",
+                        help="start an alternative group of filters (see below)")
+    parser.add_argument("-frames_all", type=str2bool, default=False,
+                        help="list all frames in <out>_frames.dat, with a 'kept' column (1/0), instead of only "
+                             "the frames that pass the filters [default: False]")
     parser.add_argument("-backend", choices=["auto", "mdanalysis", "pytraj"], default="auto",
                         help="library used to read the trajectory [default: auto]")
     parser.add_argument("-verbose", type=str2bool, default=False,
@@ -201,13 +210,12 @@ def parse_arguments(argv):
         parameter_file = pre_parser.parse_known_args(argv)[0].parameter_file
         if parameter_file:
             file_values = load_parameter_file(parameter_file)
-    # Filters are lists: file values only apply if the command line gives none of that kind
-    file_filters = {k: file_values.pop(k) for k in ("filter_distance", "filter_angle") if k in file_values}
+    # Filter groups: the command line replaces all filters of the parameter file
+    cli_groups, argv = split_filter_groups(argv, parser)
+    file_groups = file_values.pop("filter_groups", [])
     parser.set_defaults(**file_values)
     args = parser.parse_args(argv)
-    for dest, value in file_filters.items():
-        if not getattr(args, dest):
-            setattr(args, dest, value)
+    args.filter_groups = cli_groups or file_groups
 
     args.solvent = None if args.solvent == "auto" else [i for i in args.solvent.split(",") if i]
     if args.write_parameter_file:
@@ -224,6 +232,35 @@ def parse_arguments(argv):
     if args.use_qm_charges and (args.qm_charges is None or args.qm_dict is None):
         parser.error("-use_qm_charges True requires -qm_charges and -qm_dict")
     return args
+
+
+FILTER_OPTIONS = {"-filter_distance": ("distance", 3), "-filter_angle": ("angle", 4)}
+
+
+def split_filter_groups(argv, parser):
+    """Take the filter options out of argv: (groups of (kind, tokens), remaining argv).
+
+    Filters before the first -or form group 1, those after each -or the next group.
+    """
+    groups, rest, i = [[]], [], 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "-or":
+            groups.append([])
+            i += 1
+        elif token in FILTER_OPTIONS:
+            kind, n = FILTER_OPTIONS[token]
+            values = argv[i + 1:i + 1 + n]
+            if len(values) < n or any(v.startswith("-") and not v[1:2].isdigit() for v in values):
+                parser.error(f"{token} needs {n} values: {n - 1} atoms and a cutoff")
+            groups[-1].append((kind, values))
+            i += 1 + n
+        else:
+            rest.append(token)
+            i += 1
+    if len(groups) > 1 and not all(groups):
+        parser.error("-or must separate groups of filters (-filter_distance/-filter_angle) on both sides")
+    return [g for g in groups if g], rest
 
 
 def add_prefix(path, prefix):
@@ -573,13 +610,22 @@ def parse_range(text, kind):
 
 
 def load_filters(args, system):
+    """All filters, each with the number of its group (1, 2, ...); groups are combined with OR."""
     filters = []
-    for kind, specs in [("distance", f) for f in args.filter_distance] + [("angle", f) for f in args.filter_angle]:
-        *atoms, cutoff = specs
-        low, high = parse_range(cutoff, kind)
-        filters.append({"kind": kind, "label": "-".join(atoms), "low": low, "high": high,
-                        "atoms": [select_one_atom(spec, system) for spec in atoms]})
+    for group, specs_list in enumerate(args.filter_groups, start=1):
+        for kind, specs in specs_list:
+            *atoms, cutoff = specs
+            low, high = parse_range(cutoff, kind)
+            filters.append({"kind": kind, "label": "-".join(atoms), "low": low, "high": high, "group": group,
+                            "atoms": [select_one_atom(spec, system) for spec in atoms]})
     return filters
+
+
+def passing_groups(filters, values):
+    """Groups (1, 2, ...) whose filters all pass for these measured values."""
+    groups = sorted({f["group"] for f in filters})
+    return [g for g in groups
+            if all(f["low"] <= v <= f["high"] for f, v in zip(filters, values) if f["group"] == g)]
 
 
 def measure(geometry_filter, positions, box):
@@ -604,16 +650,19 @@ def filter_statistics(filters, all_values):
     stats = []
     for i, f in enumerate(filters):
         column = values[:, i]
-        stats.append({"kind": f["kind"], "label": f["label"], "low": f["low"], "high": f["high"],
+        stats.append({"kind": f["kind"], "label": f["label"], "low": f["low"], "high": f["high"], "group": f["group"],
                       "min": float(column.min()) if len(column) else None,
                       "max": float(column.max()) if len(column) else None,
                       "passed": int(((column >= f["low"]) & (column <= f["high"])).sum())})
     return stats
 
 
-def print_filter_statistics(stats, n_frames):
+def print_filter_statistics(stats, n_frames, group_counts=None):
     print(f"\nFilter values over all {n_frames} frames:")
-    for s in stats:
+    n_groups = len(group_counts or {})
+    for i, s in enumerate(stats):
+        if n_groups > 1 and (i == 0 or stats[i - 1]["group"] != s["group"]):
+            print(f"  group {s['group']}{' (or)' if s['group'] > 1 else ''}:")
         unit = "A" if s["kind"] == "distance" else "deg"
         if s["kind"] == "distance" and s["low"] == 0.0:
             condition = f"<= {s['high']:g}"
@@ -623,6 +672,8 @@ def print_filter_statistics(stats, n_frames):
             condition = f"{s['low']:g} to {s['high']:g}"
         measured = "no frames" if s["min"] is None else f"{s['min']:8.3f} to {s['max']:8.3f} {unit:<3}"
         print(f"  {s['kind']:<8} {s['label']:<32} {measured}   (filter {condition}: passed by {s['passed']} frames)")
+        if n_groups > 1 and (i == len(stats) - 1 or stats[i + 1]["group"] != s["group"]):
+            print(f"  -> all filters of group {s['group']}: passed by {group_counts[s['group']]} frames")
 
 
 #####################################################################################
@@ -823,13 +874,15 @@ def calculate_fields(args):
                   f"{int(target['excluded'].sum())} atoms excluded")
 
         for f in filters:
-            print(f"Filter {f['kind']} {f['label']}: {f['low']:g} to {f['high']:g}, atoms {f['atoms']}")
+            print(f"Filter (group {f['group']}) {f['kind']} {f['label']}: {f['low']:g} to {f['high']:g}, "
+                  f"atoms {f['atoms']}")
 
     fields = {t["name"]: [] for t in targets}
     vectors = {t["name"]: [] for t in targets}
     energies = {t["name"]: [] for t in targets}
-    kept_frames, filter_values = [], []
-    all_values = []   # every frame's filter values, to report their ranges
+    kept_frames, filter_values, frame_groups = [], [], []
+    group_counts = {g: 0 for g in sorted({f["group"] for f in filters})}
+    all_values, all_groups = [], []   # every frame's filter values and passing groups
 
     for frame_i, (positions, box) in enumerate(system.frames()):
         if args.pbc:
@@ -842,10 +895,15 @@ def calculate_fields(args):
 
         values = [measure(f, positions, box) for f in filters]
         all_values.append(values)
-        if not all(f["low"] <= v <= f["high"] for f, v in zip(filters, values)):
+        passed = passing_groups(filters, values)
+        all_groups.append(passed)
+        for g in passed:
+            group_counts[g] += 1
+        if filters and not passed:
             continue
         kept_frames.append(frame_i + 1)
         filter_values.append(values)
+        frame_groups.append(passed)
 
         charges = system.charges
         if args.use_qm_charges:
@@ -887,8 +945,9 @@ def calculate_fields(args):
 
     filter_stats = filter_statistics(filters, all_values)
     if filters:
-        print_filter_statistics(filter_stats, len(all_values))
-        print(f"Frames passing the filters: {len(kept_frames)} of {system.n_frames}")
+        print_filter_statistics(filter_stats, len(all_values), group_counts)
+        any_group = " (any group)" if len(group_counts) > 1 else ""
+        print(f"Frames passing the filters{any_group}: {len(kept_frames)} of {system.n_frames}")
         if not kept_frames:
             print("Warning! No frame passes the filters; the output contains no data.")
 
@@ -903,17 +962,30 @@ def calculate_fields(args):
               "vectors": {name: {c: vectors[name][:, i] for i, c in enumerate(components)}
                           for name in vectors},
               "frames": kept_frames, "filters": filters, "filter_values": filter_values,
+              "frame_groups": frame_groups, "group_counts": group_counts,
+              "all_values": all_values, "all_groups": all_groups,
               "filter_stats": filter_stats,
               "charges": charges_summary}
     return result
 
 
-def write_frames(path, result):
-    """Kept frame numbers and the measured filter values."""
+def write_frames(path, result, all_frames=False):
+    """Frame numbers with the measured filter values: the kept frames, or all frames with a 'kept' column."""
+    grouped = len(result["group_counts"]) > 1
+    names = [(f"g{g['group']}:" if grouped else "") + f"{g['kind']}:{g['label']}" for g in result["filters"]]
+    if all_frames:
+        rows = [(i + 1, values, groups) for i, (values, groups) in enumerate(zip(result["all_values"], result["all_groups"]))]
+    else:
+        rows = list(zip(result["frames"], result["filter_values"], result["frame_groups"]))
     with open(path, "w") as f:
-        f.write("# frame " + " ".join(f"{g['kind']}:{g['label']}" for g in result["filters"]) + "\n")
-        for frame, values in zip(result["frames"], result["filter_values"]):
-            f.write(f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in values) + "\n")
+        f.write("# frame " + " ".join(names) + (" kept" if all_frames else "") + (" groups" if grouped else "") + "\n")
+        for frame, values, groups in rows:
+            line = f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in values)
+            if all_frames:
+                line += f" {int(bool(groups)):4d}"
+            if grouped:
+                line += " " + (",".join(map(str, groups)) or "-")
+            f.write(line + "\n")
 
 
 class Tee:
@@ -975,10 +1047,10 @@ def run(args, argv, log_file=None):
     print("-solvent        Non-protein residues : ", ",".join(args.solvent) if args.solvent else "auto")
     print("-exclude_atoms  Atoms excluded       : ",
           show(args.exclude_atoms) or "Full residue of the first atom of each target")
-    for f in args.filter_distance:
-        print("-filter_distance: ", " ".join(f))
-    for f in args.filter_angle:
-        print("-filter_angle   : ", " ".join(f))
+    for group, specs_list in enumerate(args.filter_groups, start=1):
+        for kind, specs in specs_list:
+            label = f" (group {group})" if len(args.filter_groups) > 1 else ""
+            print(f"-filter_{kind:<9}: ", " ".join(specs) + label)
     for flag in ("gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
         if getattr(args, flag):
             print(f"-{flag:<15}: ", getattr(args, flag))
@@ -996,8 +1068,10 @@ def run(args, argv, log_file=None):
             pickle.dump(result["vectors"], f)
     if result["filters"]:
         frames_file = os.path.splitext(args.out)[0] + "_frames.dat"
-        write_frames(frames_file, result)
-        print("Kept frames written to : ", frames_file)
+        write_frames(frames_file, result, args.frames_all)
+        print("All frames written to : " if args.frames_all else "Kept frames written to : ", frames_file)
+    elif args.frames_all:
+        print("Note: -frames_all has no effect without filters (no frames file is written).")
     print("\nField calculation DONE : ", datetime.datetime.now())
     return result
 

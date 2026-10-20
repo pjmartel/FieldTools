@@ -313,3 +313,87 @@ def test_invalid_pymol_specifiers(spec, message):
     with pytest.raises(SystemExit) as error:
         ft.select_atoms(spec, system)
     assert message in str(error.value)
+
+
+def kpc_geometry(universe):
+    """Per frame: O71-water distance and water O - C7 - O71 angle (the quantities of the filter tests)."""
+    idx = {n: universe.select_atoms(s)[0].index for n, s in
+           [("O", "resid 264 and name O"), ("C7", "resid 40 and name C7"), ("O71", "resid 40 and name O71")]}
+    rows = []
+    for ts in universe.trajectory:
+        p = universe.atoms.positions.astype(np.float64)
+        u_, v_ = p[idx["O"]] - p[idx["C7"]], p[idx["O71"]] - p[idx["C7"]]
+        angle = np.degrees(np.arccos(np.dot(u_, v_) / (np.linalg.norm(u_) * np.linalg.norm(v_))))
+        rows.append((np.linalg.norm(p[idx["O71"]] - p[idx["O"]]), angle))
+    return np.array(rows)
+
+
+DIST = ["-filter_distance", ":40@O71", ":264@O"]
+ANGLE = ["-filter_angle", ":264@O", ":40@C7", ":40@O71"]
+
+
+def test_or_groups_keep_union_and_report_groups(tmp_path, universe):
+    geo = kpc_geometry(universe)
+    d_cut = float(np.percentile(geo[:, 0], 30))
+    a_cut = float(np.percentile(geo[:, 1], 70))
+    in_1 = geo[:, 0] <= d_cut                      # group 1: short distance
+    in_2 = geo[:, 1] >= a_cut                      # group 2: large angle
+    expected = [i + 1 for i in range(len(geo)) if in_1[i] or in_2[i]]
+    assert 0 < len(expected) < len(geo)
+    result = run(tmp_path, [":40@O71"], [EXCLUDE], DIST + [f"{d_cut:.6f}", "-or"] + ANGLE + [f"{a_cut:.6f}"])
+    assert result["frames"] == expected
+    assert result["group_counts"] == {1: int(in_1.sum()), 2: int(in_2.sum())}
+    for frame, groups in zip(result["frames"], result["frame_groups"]):
+        assert groups == [g for g, ok in ((1, in_1[frame - 1]), (2, in_2[frame - 1])) if ok]
+    lines = (tmp_path / "field_frames.dat").read_text().splitlines()
+    assert lines[0].startswith("# frame g1:distance::40@O71-:264@O g2:angle:") and lines[0].endswith(" groups")
+    assert [l.split()[-1] for l in lines[1:]] == [",".join(map(str, g)) for g in result["frame_groups"]]
+
+
+def test_filters_stay_coupled_within_a_group(tmp_path, universe):
+    # (distance AND angle) OR (distance AND angle) must not mix conditions from different groups
+    geo = kpc_geometry(universe)
+    d_cut = float(np.median(geo[:, 0]))
+    a_lo, a_hi = float(geo[:, 1].min()) - 1, float(np.median(geo[:, 1]))
+    short, small_angle = geo[:, 0] <= d_cut, geo[:, 1] <= a_hi
+    group_1 = short & small_angle
+    group_2 = ~short & ~small_angle                       # long distance AND large angle
+    args = DIST + [f"{d_cut:.6f}"] + ANGLE + [f"{a_lo:.6f}:{a_hi:.6f}", "-or",
+           "-filter_distance", ":40@O71", ":264@O", f"{d_cut:.6f}:99"] + ANGLE + [f"{a_hi:.6f}:180"]
+    result = run(tmp_path, [":40@O71"], [EXCLUDE], args)
+    assert result["frames"] == [i + 1 for i in range(len(geo)) if group_1[i] or group_2[i]]
+    mixed = [i + 1 for i in range(len(geo)) if short[i] and not small_angle[i]]   # passes one filter of each group
+    assert mixed and not set(mixed) & set(result["frames"])
+
+
+@pytest.mark.parametrize("args, message", [
+    (DIST + ["3.2", "-or"], "-or must separate groups"),
+    (["-or"] + DIST + ["3.2"], "-or must separate groups"),
+    (["-filter_distance", ":40@O71", "3.2"], "needs 3 values"),
+])
+def test_invalid_filter_groups(tmp_path, capsys, args, message):
+    with pytest.raises(SystemExit):
+        run(tmp_path, [":40@O71"], [EXCLUDE], args)
+    assert message in capsys.readouterr().err
+
+
+def test_frames_all_lists_every_frame(tmp_path, universe):
+    geo = kpc_geometry(universe)
+    d_cut = float(np.median(geo[:, 0]))
+    a_cut = float(np.percentile(geo[:, 1], 80))
+    result = run(tmp_path, [":40@O71"], [EXCLUDE],
+                 DIST + [f"{d_cut:.6f}", "-or"] + ANGLE + [f"{a_cut:.6f}", "-frames_all", "True"])
+    lines = (tmp_path / "field_frames.dat").read_text().splitlines()
+    assert lines[0].endswith(" kept groups")
+    rows = [l.split() for l in lines[1:]]
+    assert [int(r[0]) for r in rows] == list(range(1, len(geo) + 1))           # every frame
+    assert [int(r[0]) for r in rows if r[-2] == "1"] == result["frames"]        # kept column
+    assert all(r[-1] == "-" for r in rows if r[-2] == "0")
+    np.testing.assert_allclose([float(r[1]) for r in rows], geo[:, 0], atol=1e-3)
+    assert len(result["fields"][":40@O71"]["Total"]) == len(result["frames"]) < len(geo)   # fields: kept only
+
+
+def test_frames_all_single_group(tmp_path):
+    run(tmp_path, [":40@O71"], [EXCLUDE], DIST + ["2.5", "-frames_all", "True"])
+    lines = (tmp_path / "field_frames.dat").read_text().splitlines()
+    assert lines[0] == "# frame distance::40@O71-:264@O kept" and len(lines) == 11

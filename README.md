@@ -67,6 +67,8 @@ repository take effect without reinstalling; leave it out to install a fixed cop
                [-gmx_include <GROMACS force field directory>]
                [-filter_distance <atom1> <atom2> <cutoff>]
                [-filter_angle <atom1> <atom2> <atom3> <cutoff>]
+               [-or  <further filters>]
+               [-frames_all <True|False>]
                [-verbose <True|False>]
                [--prefix <prefix>]
     fieldtools --parameter-file <parameter file> [options]
@@ -86,7 +88,20 @@ Give an explicit comma-separated list to include other molecules, such as ligand
 A single value is a maximum distance or a minimum angle; `MIN:MAX` gives a range (`2.5:3.2`).
 Both options can be repeated, and a frame must pass all filters. With `-pbc True`, distances and angles use the
 nearest periodic images. The output then only contains the kept frames, and `<out>_frames.dat` lists their
-frame numbers with the measured distances and angles.
+frame numbers with the measured distances and angles (`-frames_all True` lists all frames, with a `kept` column
+of 1 or 0, e.g. for plotting the whole trajectory).
+
+`-or` starts an alternative group of filters: filters within a group must all pass (AND), and a frame is used if
+it passes any group (OR). For example, a carboxylate is in a reactive position if *either* oxygen is close to the
+methyl carbon and in line with the leaving sulfur:
+
+    -filter_distance IAA/O1 SAM/CE 3.2 -filter_angle IAA/O1 SAM/CE SAM/SD 160 \
+    -or \
+    -filter_distance IAA/O2 SAM/CE 3.2 -filter_angle IAA/O2 SAM/CE SAM/SD 160
+
+The conditions of each group stay together: a frame where O1 is close but only O2 has a good angle is not used.
+With several groups, the statistics are reported per group, and `<out>_frames.dat` gets a `groups` column with
+the group(s) each frame passes (`-` for none).
 Each run also prints the range of every filter's values over the whole trajectory and how many frames pass
 each filter on its own, which helps to choose cutoffs and to see which filter removes the frames.
 
@@ -184,8 +199,8 @@ vector_out = "vectors.pkl"
     fieldtools --parameter-file run.toml -traj md2.xtc -out field2.pkl     # override some options
     fieldtools --parameter-file run.toml -traj rep2.xtc --prefix rep2      # rep2_field.pkl, rep2_vectors.pkl, ...
 
-- Options on the command line override the parameter file; a filter on the command line replaces the file's
-  filters of that kind.
+- Options on the command line override the parameter file; filters on the command line replace all of the
+  file's filters.
 - `--prefix NAME` (or `prefix` in `[output]`) adds `NAME_` to the names of all output files, keeping their folders
   (`results/field.pkl` becomes `results/NAME_field.pkl`); without `out`, the fields go to `NAME_field.pkl`.
   The command-line prefix overrides the one in the file. Everything printed on the screen, including errors, is also
@@ -216,9 +231,11 @@ Section and key names are case-insensitive. Options that are left out take their
 | | `pbc` | true/false | `false` | `-pbc` | make residues whole and use the periodic image closest to the target |
 | `[filters]` | `distance` | list | none | `-filter_distance` | `"ATOM1 ATOM2 CUTOFF"` entries: distance <= CUTOFF (Å), or `MIN:MAX` |
 | | `angle` | list | none | `-filter_angle` | `"ATOM1 ATOM2 ATOM3 CUTOFF"` entries: angle >= CUTOFF (degrees, vertex = middle atom), or `MIN:MAX` |
+| `[[filters.or]]` | `distance`, `angle` | list | | `-or` | an alternative filter group (repeat the table for more groups), see below |
 | `[output]` | `out` | path | **required**² | `-out` | fields (`.pkl`) |
 | | `energy_out` | path | not written | `-energy_out` | Coulomb interaction energies (`.pkl`) |
 | | `vector_out` | path | not written | `-vector_out` | field vectors (`.pkl`) |
+| | `frames_all` | true/false | `false` | `-frames_all` | list all frames in `<out>_frames.dat`, with a `kept` column |
 | | `prefix` | text | none | `--prefix` | added with `_` to the names of all output files (`out` then defaults to `field.pkl`); the screen output is also written to `<prefix>.log` |
 | `[qm]` | `use_qm_charges` | true/false | `false` | `-use_qm_charges` | replace charges with per-frame QM charges (experimental) |
 | | `qm_charges` | path | | `-qm_charges` | QM charges file from `qmchargestools` |
@@ -229,7 +246,19 @@ Section and key names are case-insensitive. Options that are left out take their
 ² Not required with a prefix: the fields are then written to `<prefix>_field.pkl`.
 
 - Paths and text are written in quotes; true/false without quotes. Lists can span several lines, one entry per line.
-- A frame must pass all filters. With filters, the kept frames are also written to `<out>_frames.dat`.
+- A frame must pass all filters of `[filters]` or all filters of one `[[filters.or]]` table. With filters, the kept
+  frames (or all frames, with `frames_all`) are also written to `<out>_frames.dat`. Filters on the command line
+  replace all filters of the parameter file. Example with two groups:
+
+  ```toml
+  [filters]
+  distance = ["IAA/O1 SAM/CE 3.2"]
+  angle = ["IAA/O1 SAM/CE SAM/SD 160"]
+
+  [[filters.or]]
+  distance = ["IAA/O2 SAM/CE 3.2"]
+  angle = ["IAA/O2 SAM/CE SAM/SD 160"]
+  ```
 
 ### Atom specifiers
 Two equivalent syntaxes can be mixed freely in target and exclusion files:
