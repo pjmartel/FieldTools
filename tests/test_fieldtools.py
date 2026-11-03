@@ -396,7 +396,7 @@ def test_frames_all_lists_every_frame(tmp_path, universe):
 def test_frames_all_single_group(tmp_path):
     run(tmp_path, [":40@O71"], [EXCLUDE], DIST + ["2.5", "-frames_all", "True"])
     lines = (tmp_path / "field_frames.dat").read_text().splitlines()
-    assert lines[0] == "# frame distance::40@O71-:264@O kept" and len(lines) == 11
+    assert lines[0] == "# frame distance::40@O71-:264@O field::40@O71 kept" and len(lines) == 11
 
 
 def test_verbose_reports_progress_not_every_frame(tmp_path, capsys):
@@ -415,3 +415,20 @@ def test_progress_steps():
             progress.update(frame)
     lines = stream.getvalue().splitlines()
     assert [l.split("(")[1].split("%")[0] for l in lines] == [str(p) for p in range(10, 101, 10)]
+
+
+def test_frames_file_has_total_field_per_target(tmp_path):
+    result = run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE],
+                 DIST + ["2.55", "-or"] + ANGLE + ["115", "-frames_all", "True"])
+    lines = (tmp_path / "field_frames.dat").read_text().splitlines()
+    header = lines[0].split()[1:]
+    assert header[-4:] == ["field:" + BOND, "field:" + POINT, "kept", "groups"]
+    for line in lines[1:]:
+        cols = line.split()
+        frame, bond, point, kept = int(cols[0]), float(cols[-4]), float(cols[-3]), cols[-2]
+        if kept == "1":
+            k = result["frames"].index(frame)
+            assert bond == pytest.approx(result["fields"][BOND]["Total"][k], abs=1e-3)
+            assert point == pytest.approx(result["fields"][POINT]["Total"][k], abs=1e-3)
+        else:
+            assert np.isnan(bond) and np.isnan(point)

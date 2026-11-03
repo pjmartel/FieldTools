@@ -999,9 +999,16 @@ def format_duration(seconds):
 
 
 def write_frames(path, result, all_frames=False):
-    """Frame numbers with the measured filter values: the kept frames, or all frames with a 'kept' column."""
+    """Frame numbers with the measured filter values and the Total field of each target (MV/cm).
+
+    Only the kept frames, or all frames with a 'kept' column (frames that were not kept have no
+    field: nan). With several filter groups, a 'groups' column lists the groups each frame passes.
+    """
     grouped = len(result["group_counts"]) > 1
     names = [(f"g{g['group']}:" if grouped else "") + f"{g['kind']}:{g['label']}" for g in result["filters"]]
+    targets = list(result["fields"])
+    names += [f"field:{t}" for t in targets]
+    kept_index = {frame: k for k, frame in enumerate(result["frames"])}   # frame -> position in the fields
     if all_frames:
         rows = [(i + 1, values, groups) for i, (values, groups) in enumerate(zip(result["all_values"], result["all_groups"]))]
     else:
@@ -1009,7 +1016,9 @@ def write_frames(path, result, all_frames=False):
     with open(path, "w") as f:
         f.write("# frame " + " ".join(names) + (" kept" if all_frames else "") + (" groups" if grouped else "") + "\n")
         for frame, values, groups in rows:
-            line = f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in values)
+            k = kept_index.get(frame)
+            fields = [result["fields"][t]["Total"][k] if k is not None else float("nan") for t in targets]
+            line = f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in list(values) + fields)
             if all_frames:
                 line += f" {int(bool(groups)):4d}"
             if grouped:

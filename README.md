@@ -88,8 +88,9 @@ Give an explicit comma-separated list to include other molecules, such as ligand
 A single value is a maximum distance or a minimum angle; `MIN:MAX` gives a range (`2.5:3.2`).
 Both options can be repeated, and a frame must pass all filters. With `-pbc True`, distances and angles use the
 nearest periodic images. The output then only contains the kept frames, and `<out>_frames.dat` lists their
-frame numbers with the measured distances and angles (`-frames_all True` lists all frames, with a `kept` column
-of 1 or 0, e.g. for plotting the whole trajectory).
+frame numbers with the measured distances and angles and the Total field of each target (MV/cm), one column per
+target (`field:<target>`). `-frames_all True` lists all frames, with a `kept` column of 1 or 0, e.g. for plotting
+the whole trajectory; frames that were not kept have no field (`nan`).
 
 `-or` starts an alternative group of filters: filters within a group must all pass (AND), and a frame is used if
 it passes any group (OR). For example, a carboxylate is in a reactive position if *either* oxygen is close to the
@@ -101,7 +102,8 @@ methyl carbon and in line with the leaving sulfur:
 
 The conditions of each group stay together: a frame where O1 is close but only O2 has a good angle is not used.
 With several groups, the statistics are reported per group, and `<out>_frames.dat` gets a `groups` column with
-the group(s) each frame passes (`-` for none).
+the group(s) each frame passes: e.g. `1`, `2`, `1,2` if it passes both, or `-` for none. Every target is calculated
+on all kept frames; use this column to select, for each target, the frames where its own group passes.
 Each run also prints the range of every filter's values over the whole trajectory and how many frames pass
 each filter on its own, which helps to choose cutoffs and to see which filter removes the frames.
 
