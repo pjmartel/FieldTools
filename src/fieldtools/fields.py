@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 import warnings
 
 import numpy as np
@@ -188,7 +189,8 @@ def build_parser():
     parser.add_argument("-backend", choices=["auto", "mdanalysis", "pytraj"], default="auto",
                         help="library used to read the trajectory [default: auto]")
     parser.add_argument("-verbose", type=str2bool, default=False,
-                        help="display additional information [default: False]")
+                        help="display additional information (resolved targets and filters, and the "
+                             "progress every 10%% of the frames) [default: False]")
     parser.add_argument("-use_qm_charges", type=str2bool, default=False,
                         help="replace charges with per-frame QM charges from QMChargesTools [default: False]")
     parser.add_argument("-qm_charges", type=optional_path, default=None,
@@ -883,8 +885,11 @@ def calculate_fields(args):
     kept_frames, filter_values, frame_groups = [], [], []
     group_counts = {g: 0 for g in sorted({f["group"] for f in filters})}
     all_values, all_groups = [], []   # every frame's filter values and passing groups
+    progress = Progress(system.n_frames) if args.verbose else None
 
     for frame_i, (positions, box) in enumerate(system.frames()):
+        if progress:
+            progress.update(frame_i)
         if args.pbc:
             if box is None:
                 sys.exit("Error! -pbc True, but the trajectory has no box information.")
@@ -940,8 +945,8 @@ def calculate_fields(args):
             else:
                 energies[name].append(np.zeros(n_components))
 
-            if args.verbose:
-                print(f"Frame {frame_i + 1} {name}: Total {fields[name][-1][0]:.2f} MV/cm")
+    if progress:
+        progress.update(system.n_frames)
 
     filter_stats = filter_statistics(filters, all_values)
     if filters:
@@ -967,6 +972,30 @@ def calculate_fields(args):
               "filter_stats": filter_stats,
               "charges": charges_summary}
     return result
+
+
+class Progress:
+    """Prints progress every 10% of the frames, with elapsed and estimated remaining time."""
+
+    def __init__(self, n_frames):
+        self.n_frames, self.start, self.next_step = n_frames, time.time(), 1
+
+    def update(self, frames_done):
+        if self.n_frames == 0 or frames_done * 10 < self.next_step * self.n_frames:
+            return
+        self.next_step = frames_done * 10 // self.n_frames + 1
+        elapsed = time.time() - self.start
+        remaining = elapsed * (self.n_frames - frames_done) / frames_done if frames_done else 0.0
+        eta = f", about {format_duration(remaining)} remaining" if frames_done < self.n_frames else ""
+        print(f"Progress: {frames_done} of {self.n_frames} frames ({100 * frames_done // self.n_frames}%), "
+              f"{format_duration(elapsed)} elapsed{eta}", flush=True)
+
+
+def format_duration(seconds):
+    seconds = int(round(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
 
 
 def write_frames(path, result, all_frames=False):

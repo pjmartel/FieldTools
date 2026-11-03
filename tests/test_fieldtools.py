@@ -397,3 +397,21 @@ def test_frames_all_single_group(tmp_path):
     run(tmp_path, [":40@O71"], [EXCLUDE], DIST + ["2.5", "-frames_all", "True"])
     lines = (tmp_path / "field_frames.dat").read_text().splitlines()
     assert lines[0] == "# frame distance::40@O71-:264@O kept" and len(lines) == 11
+
+
+def test_verbose_reports_progress_not_every_frame(tmp_path, capsys):
+    run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE], ["-verbose", "True"])
+    out = capsys.readouterr().out
+    progress = [l for l in out.splitlines() if l.startswith("Progress:")]
+    assert 1 <= len(progress) <= 10 and progress[-1].startswith("Progress: 10 of 10 frames (100%)")
+    assert not any(l.startswith("Frame ") for l in out.splitlines())   # no line per frame
+
+
+def test_progress_steps():
+    import io, contextlib
+    progress, stream = ft.Progress(1000), io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        for frame in range(1001):
+            progress.update(frame)
+    lines = stream.getvalue().splitlines()
+    assert [l.split("(")[1].split("%")[0] for l in lines] == [str(p) for p in range(10, 101, 10)]
