@@ -230,3 +230,11 @@ def test_match_targets_and_log_in_parameter_file(tmp_path, parameter_file):
     ft.main(["--parameter-file", str(parameter_file), "--write-parameter-file", str(written)])
     again = ft.main(["--parameter-file", str(written)])
     assert again["target_frames"] == result["target_frames"]
+
+
+def test_frame_range_in_parameter_file(tmp_path, parameter_file):
+    text = PARAMETERS.replace('[filters]\ndistance = ["40/O71 264/O 2.6"]\n', '')
+    parameter_file.write_text(text.replace("[targets]", 'beg = 2\nend = "2170.5ps"\ndt = 3\n\n[targets]'))
+    result = ft.main(["--parameter-file", str(parameter_file)])
+    assert result["frames"] == [2, 5, 8]
+    assert ft.main(["--parameter-file", str(parameter_file), "-dt", "1"])["frames"] == list(range(2, 9))

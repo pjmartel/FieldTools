@@ -481,3 +481,37 @@ def test_field_summary_matches_output(tmp_path, capsys):
     mean, sd = float(line.split()[1]), float(line.split()[3])
     assert mean == pytest.approx(values.mean(), abs=0.01) and sd == pytest.approx(values.std(ddof=1), abs=0.01)
     assert "largest residue contributions" in out and "GLU_136" in out
+
+
+def test_frame_range_in_frame_numbers(tmp_path, kpc):
+    result = run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE, EXCLUDE],
+                 ["-beg", "3", "-end", "8", "-dt", "2", "-energy_out", "False", "-vector_out", "False"])
+    assert result["frames"] == [3, 5, 7]
+    for target in (BOND, POINT):
+        np.testing.assert_allclose(result["fields"][target]["Total"],
+                                   [kpc["fields"][target]["Total"][f - 1] for f in (3, 5, 7)])
+
+
+def test_frame_range_in_time_units(tmp_path):
+    # KPC.nc: 10 frames, 2100.5 to 2190.5 ps, every 10 ps
+    result = run(tmp_path, [":40@O71"], [EXCLUDE], ["-beg", "2120.5ps", "-end", "2.16ns", "-dt", "20ps"])
+    assert result["frames"] == [3, 5]
+    assert run(tmp_path, [":40@O71"], [EXCLUDE], ["-end", "1us"])["frames"] == list(range(1, 11))
+
+
+def test_frames_all_lists_only_the_selected_frames(tmp_path):
+    run(tmp_path, [":40@O71"], [EXCLUDE], DIST + ["2.6", "-beg", "4", "-end", "7", "-frames_all", "True"])
+    lines = (tmp_path / "field_frames.dat").read_text().splitlines()[1:]
+    assert [int(line.split()[0]) for line in lines] == [4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("option, value, message", [
+    ("-beg", "0", "whole numbers from 1"),
+    ("-end", "5parsecs", "unknown time unit"),
+    ("-dt", "15ps", "not a multiple"),
+    ("-beg", "11", "No frames selected"),
+])
+def test_frame_range_errors(tmp_path, option, value, message):
+    with pytest.raises(SystemExit) as error:
+        run(tmp_path, [":40@O71"], [EXCLUDE], [option, value])
+    assert message in str(error.value)

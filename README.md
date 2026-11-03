@@ -57,6 +57,7 @@ repository take effect without reinstalling; leave it out to install a fixed cop
                -parm <parameter file>              (or -top)
                -target <target file>
                -out <output file>                  (or --prefix)
+               [-beg <frame|time>] [-end <frame|time>] [-dt <frames|time>]
                [-solvent <non-protein residues>]   default: auto
                [-exclude_atoms <exclusion file>]
                [-TIP4P <True|False>]
@@ -82,6 +83,13 @@ Run `fieldtools -h` for a description of all options, and `fieldtools --version`
 (e.g. `WAT`, `HOH`, `SOL`, `Na+`, `Cl-`, `NA`, `CL`, `K`) are treated as solvent.
 Give an explicit comma-separated list to include other molecules, such as ligands or lipids.
 
+**Frame range.** `-beg`, `-end` and `-dt` select part of the trajectory. A plain number is a frame number
+(the first frame is 1, the same numbering as in `<out>_frames.dat`; `-dt 10` uses every 10th frame); a number
+with a unit (`fs`, `ps`, `ns`, `us`) is a time, converted to frames with the trajectory's own times
+(MDAnalysis backend). For example, `-end 1us` uses the first microsecond of a longer run, whatever the time
+between frames, and `-beg 500ns -dt 100ps` the second half of a 1 µs run, one frame every 100 ps. `-beg` and `-end`
+are included; the frame numbers in the output are those of the whole trajectory.
+
 **Frame filters.** Restrict the calculation to frames with a given geometry, e.g. reactive conformations:
 
     -filter_distance :IAA@O1 :SAM@CE 3.2            # O1-CE distance <= 3.2 A
@@ -91,7 +99,7 @@ A single value is a maximum distance or a minimum angle; `MIN:MAX` gives a range
 Both options can be repeated, and a frame must pass all filters. With `-pbc True`, distances and angles use the
 nearest periodic images. The output then only contains the kept frames, and `<out>_frames.dat` lists their
 frame numbers with the measured distances and angles and the Total field of each target (MV/cm), one column per
-target (`field:<target>`). `-frames_all True` lists all frames, with a `kept` column of 1 or 0, e.g. for plotting
+target (`field:<target>`). `-frames_all True` lists all frames (of the `-beg`/`-end`/`-dt` range), with a `kept` column of 1 or 0, e.g. for plotting
 the whole trajectory; frames that were not kept have no field (`nan`).
 
 `-or` starts an alternative group of filters: filters within a group must all pass (AND), and a frame is used if
@@ -228,6 +236,9 @@ Section and key names are case-insensitive. Options that are left out take their
 | | `traj` | path | **required** | `-traj`, `-nc` | trajectory (`.nc`, `.xtc`, `.trr`, ...); aliases `trajectory`, `nc` |
 | | `backend` | text | `"auto"` | `-backend` | `"auto"`, `"mdanalysis"` or `"pytraj"` |
 | | `gmx_include` | path | found automatically | `-gmx_include` | folder with the GROMACS force fields `#include`d by a `.top` |
+| | `beg` | number or text | first frame | `-beg` | first frame used: frame number (from 1), or time with a unit, e.g. `"500ns"` |
+| | `end` | number or text | last frame | `-end` | last frame used: frame number, or time with a unit, e.g. `"1us"` |
+| | `dt` | number or text | `1` | `-dt` | use every Nth frame, or one frame every time interval, e.g. `"100ps"` |
 | `[targets]` | `targets` | list | **required**¹ | | one target per entry: one atom (point) or two atoms (bond), e.g. `["IAA/O1 SAM/SD", "40/O71"]` |
 | | `exclude` | list | residue of the first target atom | | excluded atoms: one entry per target, or one entry for all targets, e.g. `["IAA SAM"]` |
 | | `target_file` | path | | `-target` | a target file instead of `targets`¹ |

@@ -22,6 +22,9 @@ SCHEMA = {
         "traj": ("nc", PATH, "trajectory file (.nc, .xtc, .trr, ...)"),
         "backend": ("backend", TEXT, "auto, mdanalysis or pytraj"),
         "gmx_include": ("gmx_include", PATH, "folder with the GROMACS force fields #included by a .top"),
+        "beg": ("beg", "frame", "first frame used: frame number (from 1) or time with a unit (\"500ns\")"),
+        "end": ("end", "frame", "last frame used: frame number or time with a unit (\"1us\")"),
+        "dt": ("dt", "frame", "use every Nth frame, or a frame every time interval (\"100ps\")"),
     },
     "targets": {
         "targets": ("target", LIST, "one target per entry: one atom (point) or two atoms (bond)"),
@@ -153,6 +156,10 @@ def convert(value, kind, name, folder):
         if str(value).lower() == "auto":
             return "auto"
         return convert(value, PATH, name, folder)
+    if kind == "frame":   # a frame number or a time with a unit; checked when the trajectory is read
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            error(f"{name} must be a frame number or a time with a unit in quotes, e.g. \"1us\".")
+        return str(value)
     if kind == BOOL:
         if isinstance(value, bool):
             return value
@@ -238,6 +245,7 @@ def portable_path(value, parameter_file):
 
 def example(name, kind):
     examples = {"top": '"topol.tpr"', "traj": '"traj.xtc"', "gmx_include": '"/usr/share/gromacs/top"',
+                "beg": "1", "end": '"1us"', "dt": "10",
                 "targets": '["40/C7 40/O71", "40/O71"]', "exclude": '["40 264"]',
                 "target_file": '"target.dat"', "exclude_file": '"exclude.dat"',
                 "distance": '["IAA/O1 SAM/CE 3.2"]', "angle": '["IAA/O1 SAM/CE SAM/SD 160"]',

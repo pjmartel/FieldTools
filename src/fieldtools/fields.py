@@ -10,6 +10,7 @@ Run `fieldtools -h` for usage.
 
 import argparse
 import datetime
+import math
 import os
 import pickle
 import re
@@ -147,6 +148,12 @@ def build_parser():
                         help="trajectory file (Amber .nc/.mdcrd, GROMACS .xtc/.trr, ...) [required]")
     parser.add_argument("-parm", "-top", dest="parm",
                         help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top) [required]")
+    parser.add_argument("-beg", help="first frame used: a frame number (the first frame is 1), or a time with a "
+                                     "unit, e.g. 500ns [default: first frame]")
+    parser.add_argument("-end", help="last frame used: a frame number, or a time with a unit, e.g. 1us "
+                                     "[default: last frame]")
+    parser.add_argument("-dt", help="use every Nth frame (a number), or a frame every time interval, e.g. 100ps "
+                                    "[default: every frame]")
     parser.add_argument("-target", help="target file (see below) [required]")
     parser.add_argument("-out", help="output file for the fields (.pkl) [required, unless --prefix is given]")
     parser.add_argument("-log", default="auto",
@@ -289,9 +296,9 @@ def read_lines(path):
 #####################################################################################
 
 class System:
-    """Topology arrays plus a generator over (positions, box) of each frame."""
+    """Topology arrays plus a generator over (positions, box) of each frame (or of a range of frames)."""
 
-    def __init__(self, names, resnames, resids, charges, n_frames, frames, segids=None):
+    def __init__(self, names, resnames, resids, charges, n_frames, frames, segids=None, times=None):
         self.names = np.asarray(names, dtype=str)
         self.resnames = np.asarray(resnames, dtype=str)
         self.resids = np.asarray(resids, dtype=str)
@@ -300,9 +307,17 @@ class System:
         self.n_atoms = len(self.names)
         self.n_frames = n_frames
         self._frames = frames
+        self._times = times
 
-    def frames(self):
-        return self._frames()
+    def frames(self, selection=None):
+        """(positions, box) of every frame, or of the frames of a range of 0-based indices."""
+        return self._frames(selection)
+
+    def times(self):
+        """Time of the first frame, time between frames and time of the last frame (ps)."""
+        if self._times is None:
+            sys.exit("Error! Times with a unit (e.g. -end 1us) need the MDAnalysis backend; give frame numbers instead.")
+        return self._times()
 
 
 def is_gromacs_top(parm):
@@ -373,13 +388,17 @@ def load_mdanalysis(parm, nc, gmx_include=None):
     if scale != 1.0:
         print(f"Note: converting the coordinates of {nc} from nm to A (not done by MDAnalysis {mda.__version__}).")
 
-    def frames():
-        for ts in u.trajectory:
+    def frames(selection=None):
+        trajectory = u.trajectory if selection is None else u.trajectory[selection.start:selection.stop:selection.step]
+        for ts in trajectory:
             box = None if ts.dimensions is None else np.array(ts.dimensions, dtype=np.float64)
             yield scale * ts.positions.astype(np.float64), box
 
+    def times():
+        return u.trajectory[0].time, u.trajectory.dt, u.trajectory[-1].time
+
     return System(atoms.names, atoms.resnames, atoms.resids.astype(str), atoms.charges,
-                  len(u.trajectory), frames, atoms.segids)
+                  len(u.trajectory), frames, atoms.segids, times)
 
 
 def load_pytraj(parm, nc):
@@ -391,8 +410,9 @@ def load_pytraj(parm, nc):
     residues = list(top.residues)
     atoms = list(top.atoms)
 
-    def frames():
-        for frame in traj:
+    def frames(selection=None):
+        trajectory = traj if selection is None else traj.iterframe(selection.start, selection.stop, selection.step)
+        for frame in trajectory:
             box = np.array(frame.box.values, dtype=np.float64)
             yield np.array(frame.xyz, dtype=np.float64), (box if box[:3].any() else None)
 
@@ -851,11 +871,76 @@ def qm_frame_charges(charges, qm_frames, qm_index, frame_i):
 
 
 #####################################################################################
+### Frame selection
+#####################################################################################
+
+TIME_UNITS = {"fs": 1e-3, "ps": 1.0, "ns": 1e3, "us": 1e6, "µs": 1e6}
+
+
+def parse_frame_value(text, option):
+    """'50000' -> ('frame', 50000); '1us' -> ('time', 1000000.0), in ps."""
+    match = re.fullmatch(r"\s*(\d*\.?\d+(?:[eE][+-]?\d+)?)\s*([^\d\s.]*)\s*", str(text))
+    units = ", ".join(TIME_UNITS)
+    if not match:
+        sys.exit(f"Error! {option} {text}: give a frame number or a time with a unit ({units}).")
+    number, unit = match.groups()
+    if not unit:
+        if not number.isdigit() or int(number) < 1:
+            sys.exit(f"Error! {option} {text}: frame numbers are whole numbers from 1 (the first frame); "
+                     f"for a time, add a unit ({units}).")
+        return "frame", int(number)
+    if unit.lower() not in TIME_UNITS:
+        sys.exit(f"Error! {option} {text}: unknown time unit '{unit}' (use {units}).")
+    return "time", float(number) * TIME_UNITS[unit.lower()]
+
+
+def frame_selection(args, system):
+    """0-based indices of the frames selected with -beg, -end and -dt (all frames by default)."""
+    n = system.n_frames
+    given = [(option, value) for option, value in (("-beg", args.beg), ("-end", args.end), ("-dt", args.dt))
+             if value is not None]
+    values = {option: parse_frame_value(value, option) for option, value in given}
+    if any(kind == "time" for kind, _ in values.values()):
+        t0, first_dt, t_last = system.times()
+        # The interval over the whole trajectory is more precise than the first one (times are single precision)
+        dt = (t_last - t0) / (n - 1) if n > 1 else first_dt
+        if not dt > 0 or abs(first_dt - dt) > 1e-4 * dt:
+            sys.exit(f"Error! The trajectory frames are not evenly spaced in time (first {t0:g} ps, last {t_last:g} ps, "
+                     f"{n} frames), so times cannot be converted to frames; give frame numbers instead.")
+    start, stop, step = 0, n, 1
+    if "-beg" in values:
+        kind, x = values["-beg"]
+        start = x - 1 if kind == "frame" else max(0, math.ceil((x - t0) / dt - 1e-3))
+    if "-end" in values:
+        kind, x = values["-end"]
+        stop = x if kind == "frame" else math.floor((x - t0) / dt + 1e-3) + 1
+        if stop > n:
+            print(f"Note: -end {args.end} is after the last frame; the frames are used up to the last one ({n}).")
+            stop = n
+    if "-dt" in values:
+        kind, x = values["-dt"]
+        step = x if kind == "frame" else round(x / dt)
+        if kind == "time" and (step < 1 or abs(x / dt - step) > 1e-3 * x / dt):
+            sys.exit(f"Error! -dt {args.dt} is not a multiple of the time between frames ({dt:g} ps).")
+    selection = range(start, stop, step)
+    if not selection:
+        sys.exit(f"Error! No frames selected by -beg {args.beg} -end {args.end} (the trajectory has {n} frames).")
+    if given:
+        times = ""
+        if any(kind == "time" for kind, _ in values.values()):
+            times = f", {t0 + selection[0] * dt:g} to {t0 + selection[-1] * dt:g} ps"
+        print(f"Frames used: {selection[0] + 1} to {selection[-1] + 1}, every {step}: "
+              f"{len(selection)} of {n} frames{times}")
+    return selection
+
+
+#####################################################################################
 ### Main
 #####################################################################################
 
 def calculate_fields(args):
     system = load_system(args.parm, args.nc, args.backend, args.gmx_include)
+    selection = frame_selection(args, system)
     if args.solvent is None:
         args.solvent = detect_solvent(system)
         print("-solvent        Detected solvent     : ", ",".join(args.solvent) or "none")
@@ -878,7 +963,7 @@ def calculate_fields(args):
         qm_frames, qm_index = load_qm_charges(args.qm_charges, args.qm_dict, system)
 
     if args.verbose:
-        print(f"Atoms: {system.n_atoms}  Frames: {system.n_frames}  Components: {n_components}")
+        print(f"Atoms: {system.n_atoms}  Frames: {len(selection)}  Components: {n_components}")
         for target in targets:
             atoms = ", ".join(f"{system.resnames[i]} {system.resids[i]} {system.names[i]} (index {i})"
                               for i in target["atoms"])
@@ -895,12 +980,12 @@ def calculate_fields(args):
     target_frames = {t["name"]: [] for t in targets}   # frames on which each target is calculated
     kept_frames, filter_values, frame_groups = [], [], []
     group_counts = {g: 0 for g in sorted({f["group"] for f in filters})}
-    all_values, all_groups = [], []   # every frame's filter values and passing groups
-    progress = Progress(system.n_frames) if args.verbose else None
+    all_frames, all_values, all_groups = [], [], []   # every frame's number, filter values and passing groups
+    progress = Progress(len(selection)) if args.verbose else None
 
-    for frame_i, (positions, box) in enumerate(system.frames()):
+    for done, (frame_i, (positions, box)) in enumerate(zip(selection, system.frames(selection))):
         if progress:
-            progress.update(frame_i)
+            progress.update(done)
         if args.pbc:
             if box is None:
                 sys.exit("Error! -pbc True, but the trajectory has no box information.")
@@ -910,6 +995,7 @@ def calculate_fields(args):
             box = None
 
         values = [measure(f, positions, box) for f in filters]
+        all_frames.append(frame_i + 1)
         all_values.append(values)
         passed = passing_groups(filters, values)
         all_groups.append(passed)
@@ -960,13 +1046,13 @@ def calculate_fields(args):
                 energies[name].append(np.zeros(n_components))
 
     if progress:
-        progress.update(system.n_frames)
+        progress.update(len(selection))
 
     filter_stats = filter_statistics(filters, all_values)
     if filters:
         print_filter_statistics(filter_stats, len(all_values), group_counts)
         any_group = " (any group)" if len(group_counts) > 1 else ""
-        print(f"Frames passing the filters{any_group}: {len(kept_frames)} of {system.n_frames}")
+        print(f"Frames passing the filters{any_group}: {len(kept_frames)} of {len(selection)}")
         if not kept_frames:
             print("Warning! No frame passes the filters; the output contains no data.")
 
@@ -984,7 +1070,7 @@ def calculate_fields(args):
               "kinds": {t["name"]: t["kind"] for t in targets},
               "filters": filters, "filter_values": filter_values,
               "frame_groups": frame_groups, "group_counts": group_counts,
-              "all_values": all_values, "all_groups": all_groups,
+              "all_frames": all_frames, "all_values": all_values, "all_groups": all_groups,
               "filter_stats": filter_stats,
               "charges": charges_summary}
     return result
@@ -1049,7 +1135,7 @@ def write_frames(path, result, all_frames=False):
     names += [f"field:{t}" for t in targets]
     index = {t: {frame: k for k, frame in enumerate(result["target_frames"][t])} for t in targets}
     if all_frames:
-        rows = [(i + 1, values, groups) for i, (values, groups) in enumerate(zip(result["all_values"], result["all_groups"]))]
+        rows = list(zip(result["all_frames"], result["all_values"], result["all_groups"]))
     else:
         rows = list(zip(result["frames"], result["filter_values"], result["frame_groups"]))
     with open(path, "w") as f:
@@ -1139,7 +1225,7 @@ def run(args, argv, log_file=None):
         for kind, specs in specs_list:
             label = f" (group {group})" if len(args.filter_groups) > 1 else ""
             print(f"-filter_{kind:<9}: ", " ".join(specs) + label)
-    for flag in ("match_targets", "gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
+    for flag in ("beg", "end", "dt", "match_targets", "gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
         if getattr(args, flag):
             print(f"-{flag:<15}: ", getattr(args, flag))
     print("\nField calculation RUNNING : ", datetime.datetime.now())
