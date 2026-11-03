@@ -68,7 +68,9 @@ repository take effect without reinstalling; leave it out to install a fixed cop
                [-filter_distance <atom1> <atom2> <cutoff>]
                [-filter_angle <atom1> <atom2> <atom3> <cutoff>]
                [-or  <further filters>]
+               [-match_targets <True|False>]
                [-frames_all <True|False>]
+               [-log <log file|False>]
                [-verbose <True|False>]
                [--prefix <prefix>]
     fieldtools --parameter-file <parameter file> [options]
@@ -102,8 +104,12 @@ methyl carbon and in line with the leaving sulfur:
 
 The conditions of each group stay together: a frame where O1 is close but only O2 has a good angle is not used.
 With several groups, the statistics are reported per group, and `<out>_frames.dat` gets a `groups` column with
-the group(s) each frame passes: e.g. `1`, `2`, `1,2` if it passes both, or `-` for none. Every target is calculated
-on all kept frames; use this column to select, for each target, the frames where its own group passes.
+the group(s) each frame passes: e.g. `1`, `2`, `1,2` if it passes both, or `-` for none. By default every target is
+calculated on all kept frames. With `-match_targets True` (or `match_targets = true` in `[filters]`), target 1 is only
+calculated on the frames that pass group 1, target 2 on those passing group 2, and so on: e.g. with targets
+`IAA/O1 SAM/S1` and `IAA/O2 SAM/S1` and the two groups above, each oxygen's field is only calculated when that
+oxygen is in the reactive position. This needs as many targets as filter groups, in the same order; each target
+then has its own number of frames, and in `<out>_frames.dat` a target's field column is `nan` on the other frames.
 Each run also prints the range of every filter's values over the whole trajectory and how many frames pass
 each filter on its own, which helps to choose cutoffs and to see which filter removes the frames.
 
@@ -205,9 +211,7 @@ vector_out = "vectors.pkl"
   file's filters.
 - `--prefix NAME` (or `prefix` in `[output]`) adds `NAME_` to the names of all output files, keeping their folders
   (`results/field.pkl` becomes `results/NAME_field.pkl`); without `out`, the fields go to `NAME_field.pkl`.
-  The command-line prefix overrides the one in the file. Everything printed on the screen, including errors, is also
-  written to `NAME.log` in the folder of the field file. Every run starts by printing the FieldTools version and the
-  exact command, so the log records how its results were produced.
+  The command-line prefix overrides the one in the file; the log file is then `NAME.log` in the folder of the field file.
 - Relative paths are relative to the folder of the parameter file, so it can be run from anywhere.
 - Targets and exclusions can be listed in the file (`targets`, `exclude`) or given as files (`target_file`, `exclude_file`).
 - Unknown sections or keys are reported as errors, so typos are not silently ignored.
@@ -233,11 +237,13 @@ Section and key names are case-insensitive. Options that are left out take their
 | | `pbc` | true/false | `false` | `-pbc` | make residues whole and use the periodic image closest to the target |
 | `[filters]` | `distance` | list | none | `-filter_distance` | `"ATOM1 ATOM2 CUTOFF"` entries: distance <= CUTOFF (Å), or `MIN:MAX` |
 | | `angle` | list | none | `-filter_angle` | `"ATOM1 ATOM2 ATOM3 CUTOFF"` entries: angle >= CUTOFF (degrees, vertex = middle atom), or `MIN:MAX` |
+| | `match_targets` | true/false | `false` | `-match_targets` | calculate target N only on the frames passing filter group N |
 | `[[filters.or]]` | `distance`, `angle` | list | | `-or` | an alternative filter group (repeat the table for more groups), see below |
 | `[output]` | `out` | path | **required**² | `-out` | fields (`.pkl`) |
 | | `energy_out` | path | not written | `-energy_out` | Coulomb interaction energies (`.pkl`) |
 | | `vector_out` | path | not written | `-vector_out` | field vectors (`.pkl`) |
 | | `frames_all` | true/false | `false` | `-frames_all` | list all frames in `<out>_frames.dat`, with a `kept` column |
+| | `log` | path or false | `<out>.log` | `-log` | log file with the screen output; `false` for none |
 | | `prefix` | text | none | `--prefix` | added with `_` to the names of all output files (`out` then defaults to `field.pkl`); the screen output is also written to `<prefix>.log` |
 | `[qm]` | `use_qm_charges` | true/false | `false` | `-use_qm_charges` | replace charges with per-frame QM charges (experimental) |
 | | `qm_charges` | path | | `-qm_charges` | QM charges file from `qmchargestools` |
@@ -286,7 +292,8 @@ Otherwise, the exclusion file contains one line per target (or a single line use
 (`:40@CA`), several atoms of a residue (`:40@CA,CB,HA`) or whole residues (`:264`).
 The target atom of a point target is always excluded.
 
-**Output.** The fields (MV/cm) are saved as a pickled dictionary:
+**Output.** The fields (MV/cm) are saved as a pickled dictionary with the value of every frame used (not averages;
+`fieldplot -csv` writes per-residue means and standard deviations):
 
     Fields[target][component] = [field_frame_1, field_frame_2, ...]
 
@@ -298,6 +305,12 @@ The target atom of a point target is always excluded.
 - Point targets (`:47@OG`): magnitude of each component's field vector |E|.
   Magnitudes do not add up; use `-vector_out` to obtain the field vectors (arrays of shape `(n_frames, 3)` per target and component).
 - `-energy_out` saves the Coulomb interaction energy (kJ/mol) between the target atom(s) and the environment, with the same structure.
+
+**Log file and summary.** Everything printed on the screen, including errors, is also written to a log file:
+`<out>.log` (e.g. `field.log` next to `field.pkl`), `<prefix>.log` with `--prefix`, or the file given with `-log`;
+`-log False` writes none. Every run starts by printing the FieldTools version and the exact command, and ends with a
+summary per target: the number of frames used, the mean and standard deviation of the Total, Protein and Solvent
+fields, and the five largest residue contributions, so the log records how the results were produced and what they are.
 
 ### Tests
     pip install -e ".[test]"

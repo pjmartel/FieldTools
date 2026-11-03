@@ -214,3 +214,19 @@ def test_frames_all_in_parameter_file(tmp_path, parameter_file):
     parameter_file.write_text(PARAMETERS.replace('out = "field.pkl"', 'out = "field.pkl"\nframes_all = true'))
     ft.main(["--parameter-file", str(parameter_file)])
     assert len((tmp_path / "field_frames.dat").read_text().splitlines()) == 11      # header + 10 frames
+
+
+def test_match_targets_and_log_in_parameter_file(tmp_path, parameter_file):
+    text = PARAMETERS.replace('[filters]\ndistance = ["40/O71 264/O 2.6"]\n',
+                              '[filters]\ndistance = ["40/O71 264/O 2.6"]\nmatch_targets = true\n\n'
+                              '[[filters.or]]\nangle = ["264/O 40/C7 40/O71 112"]\n')
+    text = text.replace('out = "field.pkl"', 'out = "field.pkl"\nlog = "run.log"')
+    parameter_file.write_text(text)
+    result = ft.main(["--parameter-file", str(parameter_file)])
+    assert set(result["target_frames"]) == {"40/C7_40/O71", "40/O71"}
+    assert result["target_frames"]["40/C7_40/O71"] != result["target_frames"]["40/O71"]
+    assert (tmp_path / "run.log").exists() and not (tmp_path / "field.log").exists()
+    written = tmp_path / "w.toml"
+    ft.main(["--parameter-file", str(parameter_file), "--write-parameter-file", str(written)])
+    again = ft.main(["--parameter-file", str(written)])
+    assert again["target_frames"] == result["target_frames"]

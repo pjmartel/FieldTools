@@ -432,3 +432,52 @@ def test_frames_file_has_total_field_per_target(tmp_path):
             assert point == pytest.approx(result["fields"][POINT]["Total"][k], abs=1e-3)
         else:
             assert np.isnan(bond) and np.isnan(point)
+
+
+def test_match_targets_uses_each_targets_own_group(tmp_path, universe):
+    geo = kpc_geometry(universe)
+    d_cut, a_cut = float(np.median(geo[:, 0])), float(np.percentile(geo[:, 1], 70))
+    in_1, in_2 = geo[:, 0] <= d_cut, geo[:, 1] >= a_cut
+    result = run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE],
+                 DIST + [f"{d_cut:.6f}", "-or"] + ANGLE + [f"{a_cut:.6f}", "-match_targets", "True"])
+    frames_1 = [i + 1 for i in range(len(geo)) if in_1[i]]
+    frames_2 = [i + 1 for i in range(len(geo)) if in_2[i]]
+    assert result["target_frames"] == {BOND: frames_1, POINT: frames_2}
+    assert len(result["fields"][BOND]["Total"]) == len(frames_1)
+    assert len(result["fields"][POINT]["Total"]) == len(frames_2)
+    # Same values as without -match_targets, on the matching frames
+    (tmp_path / "full").mkdir()
+    full = run(tmp_path / "full", [":40@C7 :40@O71", ":40@O71"], [EXCLUDE],
+               DIST + [f"{d_cut:.6f}", "-or"] + ANGLE + [f"{a_cut:.6f}"])
+    pick = lambda target, frames: [full["fields"][target]["Total"][full["frames"].index(f)] for f in frames]
+    np.testing.assert_allclose(result["fields"][BOND]["Total"], pick(BOND, frames_1))
+    np.testing.assert_allclose(result["fields"][POINT]["Total"], pick(POINT, frames_2))
+
+
+def test_match_targets_needs_one_group_per_target(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        run(tmp_path, [":40@C7 :40@O71", ":40@O71"], [EXCLUDE], DIST + ["2.6", "-match_targets", "True"])
+    assert "one filter group per target" in str(error.value)
+
+
+def test_log_file_by_default(tmp_path, capsys):
+    run(tmp_path, [":40@O71"], [EXCLUDE])
+    assert (tmp_path / "field.log").read_text() == capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value, expected", [("False", None), ("my.log", "my.log")])
+def test_log_option(tmp_path, monkeypatch, value, expected):
+    monkeypatch.chdir(tmp_path)
+    run(tmp_path, [":40@O71"], [EXCLUDE], ["-log", value])
+    assert not (tmp_path / "field.log").exists()
+    assert (expected is None) or (tmp_path / expected).exists()
+
+
+def test_field_summary_matches_output(tmp_path, capsys):
+    result = run(tmp_path, [":40@C7 :40@O71"], [EXCLUDE])
+    out = capsys.readouterr().out.split("Field summary")[1]
+    values = np.array(result["fields"][BOND]["Total"])
+    line = next(l for l in out.splitlines() if l.strip().startswith("Total"))
+    mean, sd = float(line.split()[1]), float(line.split()[3])
+    assert mean == pytest.approx(values.mean(), abs=0.01) and sd == pytest.approx(values.std(ddof=1), abs=0.01)
+    assert "largest residue contributions" in out and "GLU_136" in out

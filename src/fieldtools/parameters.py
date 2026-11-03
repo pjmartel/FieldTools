@@ -37,12 +37,14 @@ SCHEMA = {
     "filters": {
         "distance": ("filter_distance", LIST, "\"ATOM1 ATOM2 CUTOFF\" entries: distance <= CUTOFF (A) or MIN:MAX"),
         "angle": ("filter_angle", LIST, "\"ATOM1 ATOM2 ATOM3 CUTOFF\" entries: angle >= CUTOFF (deg) or MIN:MAX"),
+        "match_targets": ("match_targets", BOOL, "calculate target N only on frames passing filter group N"),
         # further groups: [[filters.or]] tables with distance/angle keys (see load_or_groups)
     },
     "output": {
         "out": ("out", PATH, "fields (.pkl)"),
         "energy_out": ("energy_out", PATH, "Coulomb energies (.pkl)"),
         "vector_out": ("vector_out", PATH, "field vectors (.pkl)"),
+        "log": ("log", "log", "log file [default: <out>.log or <prefix>.log]; false for none"),
         "frames_all": ("frames_all", BOOL, "list all frames in <out>_frames.dat (kept column 1/0), not only kept ones"),
         "prefix": ("prefix", TEXT, "added with _ to the names of all output files (out defaults to field.pkl); also writes <prefix>.log"),
     },
@@ -145,6 +147,12 @@ def convert(value, kind, name, folder):
         if not isinstance(value, str):
             error(f"{name} must be a file name in quotes.")
         return value if os.path.isabs(value) else os.path.normpath(os.path.join(folder, value))
+    if kind == "log":   # a path, or false for no log file
+        if value is False or str(value).lower() == "false":
+            return "False"
+        if str(value).lower() == "auto":
+            return "auto"
+        return convert(value, PATH, name, folder)
     if kind == BOOL:
         if isinstance(value, bool):
             return value

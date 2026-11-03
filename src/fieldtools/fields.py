@@ -149,6 +149,9 @@ def build_parser():
                         help="topology file with charges (Amber .parm7/.prmtop, GROMACS .tpr/.top) [required]")
     parser.add_argument("-target", help="target file (see below) [required]")
     parser.add_argument("-out", help="output file for the fields (.pkl) [required, unless --prefix is given]")
+    parser.add_argument("-log", default="auto",
+                        help="log file with everything printed on the screen [default: <out>.log, or "
+                             "<prefix>.log with --prefix; False for no log file]")
     parser.add_argument("--prefix", dest="prefix", metavar="PREFIX",
                         help="add PREFIX_ to the names of all output files (overrides the names in the "
                              "parameter file) and write the screen output to PREFIX.log; without -out, "
@@ -183,6 +186,9 @@ def build_parser():
                              ">= CUTOFF (degrees) or within MIN:MAX; can be repeated")
     parser.add_argument("-or", dest="filter_or", action="store_true",
                         help="start an alternative group of filters (see below)")
+    parser.add_argument("-match_targets", type=str2bool, default=False,
+                        help="calculate target 1 only on the frames that pass filter group 1, target 2 only on "
+                             "those passing group 2, etc. (needs as many targets as filter groups) [default: False]")
     parser.add_argument("-frames_all", type=str2bool, default=False,
                         help="list all frames in <out>_frames.dat, with a 'kept' column (1/0), instead of only "
                              "the frames that pass the filters [default: False]")
@@ -860,6 +866,10 @@ def calculate_fields(args):
     targets = load_targets(args.target, system)
     load_exclusions(args.exclude_atoms, targets, system)
     filters = load_filters(args, system)
+    n_groups = len({f["group"] for f in filters})
+    if args.match_targets and n_groups != len(targets):
+        sys.exit(f"Error! -match_targets needs one filter group per target, but there are {len(targets)} targets "
+                 f"and {n_groups} filter groups.")
     components, atom_component, is_solvent = field_components(system, args.solvent)
     n_components = len(components)
 
@@ -882,6 +892,7 @@ def calculate_fields(args):
     fields = {t["name"]: [] for t in targets}
     vectors = {t["name"]: [] for t in targets}
     energies = {t["name"]: [] for t in targets}
+    target_frames = {t["name"]: [] for t in targets}   # frames on which each target is calculated
     kept_frames, filter_values, frame_groups = [], [], []
     group_counts = {g: 0 for g in sorted({f["group"] for f in filters})}
     all_values, all_groups = [], []   # every frame's filter values and passing groups
@@ -914,8 +925,11 @@ def calculate_fields(args):
         if args.use_qm_charges:
             charges = qm_frame_charges(charges, qm_frames, qm_index, frame_i)
 
-        for target in targets:
+        for target_i, target in enumerate(targets, start=1):
+            if args.match_targets and target_i not in passed:
+                continue   # this target's own filter group does not pass in this frame
             name, atoms = target["name"], target["atoms"]
+            target_frames[name].append(frame_i + 1)
             included = ~(target["excluded"] | ignored)
             q = charges[included]
             comp, solv = atom_component[included], is_solvent[included]
@@ -966,12 +980,37 @@ def calculate_fields(args):
     result = {"fields": as_dict(fields), "energies": as_dict(energies),
               "vectors": {name: {c: vectors[name][:, i] for i, c in enumerate(components)}
                           for name in vectors},
-              "frames": kept_frames, "filters": filters, "filter_values": filter_values,
+              "frames": kept_frames, "target_frames": target_frames, "components": components,
+              "kinds": {t["name"]: t["kind"] for t in targets},
+              "filters": filters, "filter_values": filter_values,
               "frame_groups": frame_groups, "group_counts": group_counts,
               "all_values": all_values, "all_groups": all_groups,
               "filter_stats": filter_stats,
               "charges": charges_summary}
     return result
+
+
+def print_field_summary(result, n_top=5):
+    """Mean +- SD of the Total, Protein and Solvent fields of each target, and its largest residue contributions."""
+    print("\nField summary (MV/cm, mean +- standard deviation over the frames used):")
+    for name, data in result["fields"].items():
+        n = len(data["Total"])
+        kind = "field magnitude" if result["kinds"][name] == "point" else "field along the bond"
+        print(f"  {name}  ({kind}, {n} frames)")
+        if n == 0:
+            print("    no frames")
+            continue
+        stats = lambda values: (float(np.mean(values)), float(np.std(values, ddof=1)) if n > 1 else 0.0)
+        for component in ("Total", "Protein", "Solvent"):
+            mean, sd = stats(data[component])
+            print(f"    {component:<10} {mean:10.2f} +- {sd:8.2f}")
+        residues = [c for c in data if re.fullmatch(r".+_\d+", c) and c not in ("Total", "Protein", "Solvent")]
+        top = sorted(residues, key=lambda c: -abs(np.mean(data[c])))[:n_top]
+        if top:
+            print(f"    largest residue contributions:")
+            for c in top:
+                mean, sd = stats(data[c])
+                print(f"      {c:<12} {mean:10.2f} +- {sd:8.2f}")
 
 
 class Progress:
@@ -1001,14 +1040,14 @@ def format_duration(seconds):
 def write_frames(path, result, all_frames=False):
     """Frame numbers with the measured filter values and the Total field of each target (MV/cm).
 
-    Only the kept frames, or all frames with a 'kept' column (frames that were not kept have no
-    field: nan). With several filter groups, a 'groups' column lists the groups each frame passes.
+    Only the kept frames, or all frames with a 'kept' column (frames on which a target was not
+    calculated have no field: nan). With several filter groups, a 'groups' column lists the groups each frame passes.
     """
     grouped = len(result["group_counts"]) > 1
     names = [(f"g{g['group']}:" if grouped else "") + f"{g['kind']}:{g['label']}" for g in result["filters"]]
     targets = list(result["fields"])
     names += [f"field:{t}" for t in targets]
-    kept_index = {frame: k for k, frame in enumerate(result["frames"])}   # frame -> position in the fields
+    index = {t: {frame: k for k, frame in enumerate(result["target_frames"][t])} for t in targets}
     if all_frames:
         rows = [(i + 1, values, groups) for i, (values, groups) in enumerate(zip(result["all_values"], result["all_groups"]))]
     else:
@@ -1016,8 +1055,8 @@ def write_frames(path, result, all_frames=False):
     with open(path, "w") as f:
         f.write("# frame " + " ".join(names) + (" kept" if all_frames else "") + (" groups" if grouped else "") + "\n")
         for frame, values, groups in rows:
-            k = kept_index.get(frame)
-            fields = [result["fields"][t]["Total"][k] if k is not None else float("nan") for t in targets]
+            fields = [result["fields"][t]["Total"][index[t][frame]] if frame in index[t] else float("nan")
+                      for t in targets]
             line = f"{frame:7d} " + " ".join(f"{v:10.3f}" for v in list(values) + fields)
             if all_frames:
                 line += f" {int(bool(groups)):4d}"
@@ -1048,11 +1087,11 @@ def main(argv=None):
         write_parameter_file(args.write_parameter_file, args)
         print("Parameter file written to : ", args.write_parameter_file)
         return None
-    if not args.prefix:
+    log_file = log_path(args)
+    if log_file is None:
         return run(args, argv)
 
-    # With a prefix, everything printed (including errors) is also written to <prefix>.log
-    log_file = os.path.join(os.path.dirname(args.out), args.prefix + ".log")
+    # Everything printed (including errors) is also written to the log file
     stdout, stderr = sys.stdout, sys.stderr
     with open(log_file, "w") as log:
         sys.stdout, sys.stderr = Tee(stdout, log), Tee(stderr, log)
@@ -1064,6 +1103,17 @@ def main(argv=None):
             raise
         finally:
             sys.stdout, sys.stderr = stdout, stderr
+
+
+def log_path(args):
+    """<out>.log, <prefix>.log with a prefix, the -log file, or None for -log False."""
+    if str(args.log).lower() in ("false", "none", "no", ""):
+        return None
+    if args.log != "auto":
+        return args.log
+    if args.prefix:
+        return os.path.join(os.path.dirname(args.out), args.prefix + ".log")
+    return os.path.splitext(args.out)[0] + ".log"
 
 
 def run(args, argv, log_file=None):
@@ -1089,7 +1139,7 @@ def run(args, argv, log_file=None):
         for kind, specs in specs_list:
             label = f" (group {group})" if len(args.filter_groups) > 1 else ""
             print(f"-filter_{kind:<9}: ", " ".join(specs) + label)
-    for flag in ("gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
+    for flag in ("match_targets", "gmx_include", "TIP4P", "pbc", "energy_out", "vector_out", "use_qm_charges", "qm_charges", "qm_dict"):
         if getattr(args, flag):
             print(f"-{flag:<15}: ", getattr(args, flag))
     print("\nField calculation RUNNING : ", datetime.datetime.now())
@@ -1110,6 +1160,7 @@ def run(args, argv, log_file=None):
         print("All frames written to : " if args.frames_all else "Kept frames written to : ", frames_file)
     elif args.frames_all:
         print("Note: -frames_all has no effect without filters (no frames file is written).")
+    print_field_summary(result)
     print("\nField calculation DONE : ", datetime.datetime.now())
     return result
 
